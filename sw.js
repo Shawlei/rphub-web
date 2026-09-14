@@ -1,6 +1,6 @@
 // RP-Hub 定制网页版 Service Worker
 // 注意：每次发版请递增下面的 CACHE_NAME 版本号，以刷新客户端缓存。
-const CACHE_NAME = 'rphub-web-v3';
+const CACHE_NAME = 'rphub-web-v4';
 const STATIC_ASSETS = [
     './',
     './index.html',
@@ -67,7 +67,27 @@ self.addEventListener('fetch', (event) => {
 
     // 带查询串的请求（如 assets/js/app.js?v=1735... 的时间戳防缓存机制）不接管、不写入缓存：
     // 既保证业务脚本永远走网络拿最新版本，也避免 cache.put 无限制膨胀。
-    if (new URL(request.url).search) return;
+    const url = new URL(request.url);
+    if (url.search) return;
+
+    // HTML / 导航请求走 network-first：发版后**刷新一次**就能看到新内容。
+    // （旧策略对所有请求一视同仁用 cache-first，结果是"明明已经部署，
+    //   回来却还是旧界面"，必须刷新两次才生效，极易误判为部署失败。）
+    // 离线时回退到缓存，离线可用性不受影响。
+    if (request.mode === 'navigate' || /\.html?$/i.test(url.pathname)) {
+        event.respondWith(
+            fetch(request).then((response) => {
+                if (response && response.status === 200) {
+                    const responseToCache = response.clone();
+                    caches.open(CACHE_NAME).then((cache) => {
+                        cache.put(request, responseToCache);
+                    });
+                }
+                return response;
+            }).catch(() => caches.match(request).then((cached) => cached || caches.match('./index.html')))
+        );
+        return;
+    }
 
     event.respondWith(
         caches.match(request).then((cachedResponse) => {
