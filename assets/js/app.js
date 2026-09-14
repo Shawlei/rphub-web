@@ -630,8 +630,6 @@ const app = createApp({
             imageGenKey: '',
             imageStyle: 'vertical',
             customImageArtists: '',
-            exportPath: '',
-            backupSectionExpanded: false,
             imageModel: 'nai-diffusion-4-5-full',
             imageSize: '竖图',
             imageGenCount: 2,
@@ -1819,35 +1817,6 @@ const app = createApp({
             await setStoredValue('characters', unwrapForStorage(characters.value), { clone: false });
         };
 
-        // ==== Android 自定义导出路径 ====
-        // 是否运行在原生壳（Capacitor/Cordova）内。浏览器中为 false，
-        // 用于隐藏"自定义导出路径"等 Android 专属设置项。
-        const isNativeApp = !!(window.Capacitor?.isNativePlatform?.());
-        const applyExportPath = async (path, { silent = false } = {}) => {
-            try {
-                if (window.Capacitor?.Plugins?.ExportPath) {
-                    const result = await window.Capacitor.Plugins.ExportPath.setExportPath({ path: path || '' });
-                    window.RPHubExportPath = result?.isDefault ? '' : (path || '').trim();
-                    return true;
-                }
-            } catch (err) {
-                console.log('ExportPath plugin not available:', err);
-                if (!silent) showToast('设置导出路径失败', 'error');
-            }
-            return false;
-        };
-        const resetExportPath = async () => {
-            settings.exportPath = '';
-            await applyExportPath('');
-            showToast('已恢复默认导出路径', 'success');
-        };
-        let _exportPathSyncTimer = null;
-        watch(() => settings.exportPath, (path) => {
-            if (!_initComplete) return;
-            clearTimeout(_exportPathSyncTimer);
-            _exportPathSyncTimer = setTimeout(() => applyExportPath(path, { silent: true }), 600);
-        });
-
         // ==== 上游同步状态 ====
         const upstreamSync = window.RPHubUpstreamSync.useUpstreamSync();
 
@@ -1881,7 +1850,7 @@ const app = createApp({
             const extension = blob.type === 'image/jpeg' ? 'jpg' : blob.type === 'image/webp' ? 'webp' : 'png';
             const characterName = String(currentCharacter.value?.name || 'generated_image').replace(/[\\/:*?"<>|]/g, '_');
             const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-            await cardUtils.downloadBlob(blob, `${characterName}_${timestamp}.${extension}`, { subDir: 'Generated_Images' });
+            await cardUtils.downloadBlob(blob, `${characterName}_${timestamp}.${extension}`);
             showToast('图片已保存到本地', 'success');
         };
         const saveToGallery = (src) => {
@@ -9133,7 +9102,7 @@ const app = createApp({
             try {
                 const v2Data = buildCharacterExportData(char);
                 const blob = new Blob([JSON.stringify(v2Data, null, 2)], { type: 'application/json' });
-                cardUtils.downloadBlob(blob, (char.name || 'character') + '.json', { subDir: 'Characters' });
+                cardUtils.downloadBlob(blob, (char.name || 'character') + '.json');
                 showToast('角色卡 JSON 导出成功', 'success');
             } catch (e) {
                 console.error('JSON export error:', e);
@@ -9227,7 +9196,7 @@ const app = createApp({
                 }));
                 const chatLines = [manifest, ...compactBranchChats].map(record => JSON.stringify(record)).join('\n');
                 const chatBlob = new Blob([chatLines], { type: 'application/x-ndjson;charset=utf-8' });
-                await cardUtils.downloadBlob(chatBlob, (char.name || 'character') + '_全部分支_chat.jsonl', { subDir: 'Chats' });
+                await cardUtils.downloadBlob(chatBlob, (char.name || 'character') + '_全部分支_chat.jsonl');
                 showToast(`已导出 ${branches.length} 个分支，共 ${totalMessages} 条聊天记录`, 'success');
             } catch (chatExpError) {
                 console.error('Chat export error:', chatExpError);
@@ -9247,7 +9216,7 @@ const app = createApp({
                     'chara',
                     cardUtils.encodeBase64Utf8(JSON.stringify(v2Data))
                 );
-                cardUtils.downloadBlob(new Blob([finalPng], { type: 'image/png' }), (char.name || 'character') + '.png', { subDir: 'Characters' });
+                cardUtils.downloadBlob(new Blob([finalPng], { type: 'image/png' }), (char.name || 'character') + '.png');
                 showToast('角色卡 PNG 导出成功', 'success');
             } catch (e) {
                 console.error('PNG export error:', e);
@@ -9304,7 +9273,6 @@ const app = createApp({
         onMounted(async () => {
             try { await loadImageGallery(); } catch (e) { console.warn('loadImageGallery failed', e); }
             try { await loadGalleryMeta(); } catch (e) { }
-            try { if (settings.exportPath) await applyExportPath(settings.exportPath, { silent: true }); } catch (e) { }
             document.addEventListener('fullscreenchange', syncChatFullscreenState);
             document.addEventListener('webkitfullscreenchange', syncChatFullscreenState);
 
@@ -9764,8 +9732,6 @@ const app = createApp({
         };
 
         return {
-            isNativeApp,
-            applyExportPath, resetExportPath,
             upstreamSync,
             imageGallery, galleryFilterChar, galleryPreviewSrc, showGalleryPreview, galleryCacheStats,
             getGalleryItemDisplaySrc, openGallery, openGalleryPreview, closeGalleryPreview, confirmGalleryImageSave,

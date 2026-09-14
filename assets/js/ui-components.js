@@ -2159,7 +2159,7 @@
                     </button>
                     <label class="settings-icon-button cursor-pointer" title="导入">
                         <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><use href="#icon-import"></use></svg>
-                        <input type="file" accept=".json,application/json,text/plain" @change="$emit('import', $event)" class="hidden">
+                        <input type="file" accept=".json" @change="$emit('import', $event)" class="hidden">
                     </label>
                     <button @click="$emit('create')" class="settings-create-button" title="新建模板">
                         <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
