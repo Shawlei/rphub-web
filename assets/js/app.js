@@ -1848,6 +1848,9 @@ const app = createApp({
             _exportPathSyncTimer = setTimeout(() => applyExportPath(path, { silent: true }), 600);
         });
 
+        // ==== 上游同步状态 ====
+        const upstreamSync = window.RPHubUpstreamSync.useUpstreamSync();
+
         // ==== 图库 / 相册 + 生图预览 (迁移) ====
         const showGeneratedImagePreview = ref(false);
         const generatedImagePreviewSrc = ref('');
@@ -9763,6 +9766,7 @@ const app = createApp({
         return {
             isNativeApp,
             applyExportPath, resetExportPath,
+            upstreamSync,
             imageGallery, galleryFilterChar, galleryPreviewSrc, showGalleryPreview, galleryCacheStats,
             getGalleryItemDisplaySrc, openGallery, openGalleryPreview, closeGalleryPreview, confirmGalleryImageSave,
             galleryCharacters, galleryAlbums, openAlbum, filteredGallery, galleryDateSections, visibleGalleryItems, handleGalleryScroll,

@@ -1,11 +1,11 @@
 // RP-Hub 定制网页版 Service Worker
 // 注意：每次发版请递增下面的 CACHE_NAME 版本号，以刷新客户端缓存。
-const CACHE_NAME = 'rphub-web-v1';
+const CACHE_NAME = 'rphub-web-v2';
 const STATIC_ASSETS = [
     './',
     './index.html',
     './assets/css/styles.css',
-    // 业务脚本（9 个）
+    // 业务脚本（10 个）
     './assets/js/api-utils.js',
     './assets/js/app.js',
     './assets/js/built-in-content.js',
@@ -15,6 +15,7 @@ const STATIC_ASSETS = [
     './assets/js/runtime-services.js',
     './assets/js/ui-components.js',
     './assets/js/update-check.js',
+    './assets/js/upstream-sync.js',
     // 第三方库（6 个）
     './assets/js/vendor/jquery.min.js',
     './assets/js/vendor/marked.min.js',

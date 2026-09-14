@@ -1,0 +1,172 @@
+name: Sync upstream
+
+on:
+  schedule:
+    # 每天 UTC 03:00（北京 11:00）
+    - cron: '0 3 * * *'
+  # 手动触发入口，供以后网页端按钮调用
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+jobs:
+  sync:
+    name: Sync upstream into rphub-web
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Configure git
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # 上游发布为 CRLF、本仓库为 LF，关闭自动换行转换以免产生假冲突
+          git config core.autocrlf false
+
+      - name: Add upstream remote
+        shell: bash
+        run: |
+          git remote add upstream https://github.com/STA1N156/RP-Hub.git || true
+
+      - name: Fetch upstream
+        shell: bash
+        run: |
+          git fetch upstream main
+
+      - name: Sync upstream
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          UP=$(git rev-parse upstream/main)
+          UP_SHORT=$(git rev-parse --short upstream/main)
+          BASE=$(python3 -c "import json;print(json.load(open('upstream-base.json'))['base'])")
+          TAG=$(git describe --tags --abbrev=0 upstream/main 2>/dev/null || true)
+
+          echo "upstream tip : $UP ($UP_SHORT)"
+          echo "current base : $BASE"
+          echo "upstream tag : ${TAG:-<none>}"
+
+          # 1) 上游没有新提交 → 正常结束
+          if [ "$UP" = "$BASE" ]; then
+            echo "上游无新提交"
+            exit 0
+          fi
+
+          # 2) 上游 tip 已在当前历史中 → 无需合并
+          if git merge-base --is-ancestor upstream/main HEAD; then
+            echo "上游 tip 已在当前分支历史中，无需合并"
+            exit 0
+          fi
+
+          # 3) 尝试合并。
+          #    上游发布为 CRLF、本仓库为 LF，必须加 -X ignore-cr-at-eol，
+          #    否则连未改动过的文件也会报 CONFLICT。
+          set +e
+          MERGE_OUT=$(git merge --no-edit -X ignore-cr-at-eol upstream/main 2>&1)
+          MERGE_RC=$?
+          set -e
+          printf '%s\n' "$MERGE_OUT"
+
+          if [ "$MERGE_RC" -ne 0 ]; then
+            # 3a) 存在冲突：先抓冲突清单，再回滚，最后开 Issue
+            CONFLICTS=$(git diff --name-only --diff-filter=U || true)
+            git merge --abort || true
+            ISSUE_TITLE="⚠️ 上游 ${TAG:-$UP_SHORT} 同步遇到冲突，需要人工处理"
+            {
+              echo "自动同步上游时发生合并冲突，需要人工处理。"
+              echo ""
+              echo "- 上游仓库：\`STA1N156/RP-Hub\`"
+              echo "- 上游提交：\`$UP_SHORT\`（${TAG:-无 tag}）"
+              echo "- 当前基准：\`$BASE\`"
+              echo ""
+              echo "## 冲突文件"
+              echo "$CONFLICTS" | sed 's/^/- `/; s/$/`/'
+              echo ""
+              echo "## 操作指引"
+              echo "在本机执行："
+              echo '```bash'
+              echo "git fetch upstream && git merge -X ignore-cr-at-eol upstream/main"
+              echo '```'
+              echo "逐块参考 \`docs/定制改动施工清单.md\` 的 C1～C11 手动解决冲突后提交。"
+            } > /tmp/issue_body.md
+            EXISTING_ISSUE=$(gh issue list --state open --limit 100 --json title --jq '.[].title' | grep -Fx -- "$ISSUE_TITLE" || true)
+            if [ -z "$EXISTING_ISSUE" ]; then
+              gh issue create --title "$ISSUE_TITLE" --body-file /tmp/issue_body.md
+            else
+              echo "已存在同名未关闭 Issue，跳过创建"
+            fi
+            exit 0
+          fi
+
+          # 4) Already up to date（理论上已被前面拦截，这里兜底）
+          if printf '%s' "$MERGE_OUT" | grep -q "Already up to date"; then
+            echo "Already up to date"
+            exit 0
+          fi
+
+          # 5) 合并成功：更新基准标记文件，并折进这次合并提交
+          NOW=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          export UP UP_SHORT NOW
+          export TAG
+          python3 - <<'PY'
+          import json
+          import os
+
+          path = 'upstream-base.json'
+          with open(path, encoding='utf-8') as fh:
+              data = json.load(fh)
+          data['base'] = os.environ['UP']
+          data['tag'] = os.environ.get('TAG') or os.environ['UP_SHORT']
+          data['syncedAt'] = os.environ['NOW']
+          with open(path, 'w', encoding='utf-8') as fh:
+              json.dump(data, fh, ensure_ascii=False, indent=2)
+              fh.write('\n')
+          PY
+
+          git add upstream-base.json
+          # 仅当这次真的产生了合并提交（HEAD 有 2 个父提交）时才 amend；
+          # 若是快进合并（NEW 无新提交对象）则退化为普通提交，避免误改上游提交。
+          PARENT_TOKENS=$(git rev-list --parents -n 1 HEAD | wc -w)
+          if [ "$PARENT_TOKENS" -ge 3 ]; then
+            git commit --amend --no-edit
+          else
+            git commit -m "chore(sync): 更新上游基准到 ${TAG:-$UP_SHORT}"
+          fi
+
+          BRANCH="sync/upstream-$UP_SHORT"
+          git push origin "HEAD:refs/heads/$BRANCH"
+
+          EXISTING_PR=$(gh pr list --head "$BRANCH" --state open --json number --jq 'length')
+          if [ "$EXISTING_PR" = "0" ]; then
+            cat > /tmp/pr_body.md <<'MD'
+          ## 自动同步上游
+
+          本 PR 由 GitHub Actions（`Sync upstream` 工作流）自动生成，将上游 `STA1N156/RP-Hub` 的最新提交合并进本仓库。
+
+          ### 合并前必须验证
+          请先点开 **Cloudflare Pages 为该分支生成的预览网址**，确认页面功能正常，再合并本 PR。
+
+          ### 请重点留意的定制文件
+          以下 5 个文件在本仓库中被定制过，合并时请仔细确认是否被上游覆盖：
+          - `index.html`
+          - `assets/js/app.js`
+          - `assets/js/core-utils.js`
+          - `assets/js/ui-components.js`
+          - `assets/css/styles.css`
+          MD
+            gh pr create --base main --head "$BRANCH" \
+              --title "chore(sync): 同步上游 ${TAG:-$UP_SHORT}" \
+              --body-file /tmp/pr_body.md
+          else
+            echo "已存在该分支的 PR，跳过创建"
+          fi

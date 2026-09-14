@@ -2180,6 +2180,51 @@
                         </div>
                     </div>
 
+                    <!-- 上游同步 -->
+                    <div v-if="upstreamSync" class="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden mb-6">
+                        <div class="px-5 py-3.5 border-b border-gray-100 flex items-center">
+                            <svg class="w-5 h-5 mr-2 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                    d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15">
+                                </path>
+                            </svg>
+                            <h4 class="font-bold text-gray-700">上游同步</h4>
+                        </div>
+                        <div class="p-5 space-y-3">
+                            <p class="text-sm text-gray-500 leading-relaxed">
+                                本版本基于上游 STA1N156/RP-Hub 演绎，GitHub Actions 每天自动检查并合并上游更新。
+                            </p>
+                            <div class="flex items-center justify-between gap-3 text-sm">
+                                <span class="text-gray-500">当前基准</span>
+                                <span class="font-semibold text-gray-700 tabular-nums">
+                                    v{{ upstreamSync.baseTag.value || '—' }}<span class="text-gray-400">（{{ upstreamSync.base.value || '—' }}）</span>
+                                </span>
+                            </div>
+                            <div class="flex items-center justify-between gap-3 text-sm">
+                                <span class="text-gray-500">上游最新</span>
+                                <span v-if="upstreamSync.status.value === 'up-to-date'" class="font-bold text-emerald-600">已是最新</span>
+                                <span v-else-if="upstreamSync.status.value === 'behind'" class="font-bold text-amber-600">
+                                    上游有新版本（{{ upstreamSync.latest.value }}），Actions 将自动同步并开出 PR
+                                </span>
+                                <span v-else-if="upstreamSync.status.value === 'checking'" class="font-semibold text-gray-500">检查中…</span>
+                                <span v-else-if="upstreamSync.status.value === 'error'" class="font-semibold text-gray-400">无法检查（可能被限流或离线）</span>
+                                <span v-else class="font-semibold text-gray-400">—</span>
+                            </div>
+                            <div v-if="upstreamSync.status.value === 'behind'" class="text-sm">
+                                <a href="https://github.com/Shawlei/rphub-web/pulls" target="_blank" rel="noopener noreferrer"
+                                    class="text-primary-600 hover:text-primary-700 font-semibold">查看同步 PR</a>
+                            </div>
+                            <div class="flex items-center justify-between gap-3 pt-1">
+                                <span class="text-xs text-gray-400">上次检查：{{ upstreamSync.lastChecked.value || '—' }}</span>
+                                <button type="button" @click="upstreamSync.refresh"
+                                    :disabled="upstreamSync.status.value === 'checking'"
+                                    class="px-4 py-2 text-sm font-bold text-gray-600 bg-white border border-gray-200 rounded-xl shadow-sm hover:bg-gray-50 hover:shadow-md active:scale-95 transition-all disabled:opacity-40 disabled:shadow-none disabled:cursor-not-allowed">
+                                    立即检查
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+
                 </div>
             </div>
 
@@ -3091,6 +3136,7 @@
         document.write('<script src="assets/js/runtime-services.js?v=' + new Date().getTime() + '"><\/script>');
         document.write('<script src="assets/js/update-check.js?v=' + new Date().getTime() + '"><\/script>');
         document.write('<script src="assets/js/ui-components.js?v=' + new Date().getTime() + '"><\/script>');
+        document.write('<script src="assets/js/upstream-sync.js?v=' + new Date().getTime() + '"><\/script>');
         document.write('<script src="assets/js/app.js?v=' + new Date().getTime() + '"><\/script>');
     </script>
     <script>

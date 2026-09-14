@@ -70,8 +70,8 @@ git merge -X ignore-cr-at-eol upstream/main
 > `assets/js/data-services.js`）都会报冲突。已实测：不加参数 → `CONFLICT`；
 > 加上 → 干净合并。
 >
-> 合并后只有真正被定制过的文件（`index.html`、`app.js`、`core-utils.js`、
-> `ui-components.js`、`styles.css`）可能冲突，逐块取舍即可 ——
+> 合并后只有真正被定制过的文件（`assets/js/app.js`、`assets/js/core-utils.js`、
+> `assets/js/ui-components.js`、`assets/css/styles.css`、`index.html`）可能冲突，逐块取舍即可 ——
 > 每个改动块的含义见 `docs/定制改动施工清单.md`（C1～C11）。
 
 上游远程已在本地配好：
