@@ -38,7 +38,7 @@ jobs:
       - name: Fetch upstream
         shell: bash
         run: |
-          git fetch upstream main
+          git fetch upstream main --tags
 
       - name: Sync upstream
         shell: bash
