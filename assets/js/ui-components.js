@@ -297,7 +297,8 @@
         { view: 'usage', label: '用量统计', icon: 'M4 19V9m5 10V5m5 14v-7m5 7V3M3 21h18' },
         { view: 'memory', label: '记忆系统', status: 'memory', icon: 'M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z' },
         { view: 'uitemplates', label: 'UI模板', status: 'ui', icon: 'M4 5a2 2 0 012-2h12a2 2 0 012 2v14a2 2 0 01-2 2H6a2 2 0 01-2-2V5zm4 3h8M8 12h8M8 16h5' },
-        { view: 'characters', label: '角色卡管理', icon: 'M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z' }
+        { view: 'characters', label: '角色卡管理', icon: 'M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z' },
+        { view: 'gallery', label: '图库', icon: 'M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z' }
     ]);
     const onlineItems = Object.freeze([
         { view: 'generator', label: '角色卡生成', icon: 'M15 8a3 3 0 11-6 0 3 3 0 016 0zm-3 5c-4 0-7 2-7 5v1h8m5-6v6m-3-3h6' },
@@ -2158,7 +2159,7 @@
                     </button>
                     <label class="settings-icon-button cursor-pointer" title="导入">
                         <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><use href="#icon-import"></use></svg>
-                        <input type="file" accept=".json" @change="$emit('import', $event)" class="hidden">
+                        <input type="file" accept=".json,application/json,text/plain" @change="$emit('import', $event)" class="hidden">
                     </label>
                     <button @click="$emit('create')" class="settings-create-button" title="新建模板">
                         <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -2781,7 +2782,27 @@
                     if (Math.abs(distance) >= threshold || quickSwipe) move(distance < 0 ? 1 : -1);
                 }
             };
+            // 关键：importing 为 true 时会同时把 busy 置为 true 并让整个舞台 inert。
+            // 一旦 revealImportedCard 的某个 await（动画 finished / 组件卸载竞态）不落定，
+            // 界面会永久锁死（busy 永不归零）。加一个看门狗，超时后无条件复位 importing。
+            let importWatchdogTimer = null;
+            const clearImportWatchdog = () => {
+                if (importWatchdogTimer) {
+                    clearTimeout(importWatchdogTimer);
+                    importWatchdogTimer = null;
+                }
+            };
+            const armImportWatchdog = () => {
+                clearImportWatchdog();
+                importWatchdogTimer = setTimeout(() => {
+                    if (importing.value) {
+                        console.warn('character deck import state stuck, force unlock');
+                        cancelImportAnimation();
+                    }
+                }, 8000);
+            };
             const cancelImportAnimation = () => {
+                clearImportWatchdog();
                 importAnimation?.cancel();
                 importAnimation = null;
                 importing.value = false;
@@ -2792,11 +2813,13 @@
                 cancelImportAnimation();
                 opening.value = false;
                 importing.value = true;
+                armImportWatchdog();
                 focusedId.value = id;
                 await nextTick();
                 const card = stageRef.value?.querySelector('.character-deck__item.is-focused');
                 if (!props.visible || !card?.animate || window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
                     importing.value = false;
+                    clearImportWatchdog();
                     return;
                 }
                 let animation = null;
@@ -2806,7 +2829,16 @@
                         { transform: 'translateX(-50%) translateY(0) scale(1)', opacity: 1 }
                     ], { duration: 650, easing: 'cubic-bezier(0.22, 0.72, 0.18, 1)' });
                     importAnimation = animation;
-                    await animation.finished;
+                    // 关键：animation.finished 在动画被取消/元素卸载/文档不可见等情况下可能永不落定，
+                    // 加超时保证一定会走到 finally 复位 importing。
+                    // 时长与兜底语义保持不变：动画卡死时 1.5s 后仍会放掉 importing（H2 护栏）。
+                    let animationTimeoutId = null;
+                    await Promise.race([
+                        animation.finished,
+                        new Promise(resolve => {
+                            animationTimeoutId = setTimeout(resolve, 1500);
+                        })
+                    ]).finally(() => clearTimeout(animationTimeoutId)); // 关键：动画正常结束时必须清掉这个 1.5s 兜底定时器，避免残留无谓唤醒；清理定时器不等于取消护栏
                 } catch {
                     // 离开页面或动画不受支持时，不阻断角色卡导入。
                 } finally {

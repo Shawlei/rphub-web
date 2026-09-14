@@ -9,14 +9,15 @@
     <title>RP Hub</title>
     <!-- GitHub Pages rebuild marker for CSS-only animation update. -->
     <!-- <link rel="icon" href="logo.jpg" type="image/jpeg"> -->
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Lora:ital,wght@0,400..700;1,400..700&display=swap" rel="stylesheet">
-    <script src="https://cdn.tailwindcss.com"></script>
-    <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/dompurify@3.0.6/dist/purify.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/sortablejs@latest/Sortable.min.js"></script>
+
+
+
+    <link rel="stylesheet" href="libs/tailwind.css">
+    <script src="./assets/js/vendor/tailwind.js"></script>
+    <script src="./assets/js/vendor/vue.global.prod.js"></script>
+    <script src="./assets/js/vendor/marked.min.js"></script>
+    <script src="./assets/js/vendor/purify.min.js"></script>
+    <script src="./assets/js/vendor/Sortable.min.js"></script>
     <script>
         tailwind.config = {
             theme: {
@@ -360,6 +361,22 @@
                     @scroll="handleChatScroll"
                     class="flex-1 overflow-y-auto overflow-x-hidden px-2 pt-14 md:pt-16 pb-52 md:pb-60 relative z-0 space-y-12 md:space-y-14 transition-all duration-500"
                     :class="!settings.useCharacterBackground || !currentCharacter || !currentCharacter?.avatar ? 'bg-gray-50' : ''">
+                    <div v-if="isBatchMessageDeleteMode" class="sticky top-0 z-30 mx-2 mb-2 flex items-center justify-between gap-3 px-3 py-2 bg-white/95 backdrop-blur-md rounded-xl border border-gray-200 shadow-lg">
+                        <div class="flex items-center gap-2">
+                            <span class="text-xs font-bold text-gray-700">已选 <span class="text-red-600">{{ selectedMessageIndices.size }}</span> 条</span>
+                            <button @click="selectAllMessages" class="text-xs px-2.5 py-1 rounded-lg bg-gray-100 hover:bg-gray-200 text-gray-700 font-medium">
+                                {{ selectedMessageIndices.size === chatHistory.length ? '取消全选' : '全选' }}
+                            </button>
+                        </div>
+                        <div class="flex items-center gap-2">
+                            <button @click="cancelBatchMessageDelete" class="text-xs px-3 py-1.5 rounded-xl border border-gray-200 text-gray-600 hover:bg-gray-50 font-medium">取消</button>
+                            <button @click="confirmBatchDeleteMessages" :disabled="selectedMessageIndices.size === 0"
+                                class="text-xs px-3.5 py-1.5 rounded-xl bg-red-600 hover:bg-red-700 disabled:opacity-40 text-white font-bold shadow-sm flex items-center gap-1">
+                                <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>
+                                <span>删除选中</span>
+                            </button>
+                        </div>
+                    </div>
                     <div v-if="!currentCharacter"
                         class="flex flex-col items-center justify-center h-full text-gray-500">
                         <div class="w-24 h-24 bg-gray-200 rounded-full mb-4 flex items-center justify-center">
@@ -386,11 +403,20 @@
                     <div ref="messageElements"
                         :data-role="msg.role"
                         :data-chat-index="index"
+                        @click="isBatchMessageDeleteMode && toggleMessageSelection(index)"
                         v-show="!(msg.role === 'assistant' && index === chatHistory.length - 1 && isThinking && !(msg.reasoning || parseCot(msg.content).cot || parseCot(msg.content).main || (msg.toolCalls && msg.toolCalls.length)))"
                         :class="['flex w-full scroll-reveal-container', settings.immersiveMode ? 'immersive-message-row' : 'standard-message-row', msg.isSelf ? 'justify-end' : 'justify-start', msg.skipReveal ? 'reveal-active' : (settings.immersiveMode ? 'scroll-reveal-center' : (msg.isSelf ? 'scroll-reveal-right' : 'scroll-reveal-left'))]"
-                        :style="{ transitionDelay: (displayIndex % 5) * 50 + 'ms' }">
+                        :style="Object.assign({ transitionDelay: (displayIndex % 5) * 50 + 'ms' }, selectedMessageIndices.has(index) ? { boxShadow: '0 0 0 3px rgb(248 113 113) inset', borderRadius: '1rem' } : {})"
                         <div
                             :class="['flex centered-message-shell max-w-[99%]', settings.immersiveMode ? 'immersive-message-shell' : 'standard-message-shell', messageUsesWideLayout(msg) || msg.isEditing_Message ? 'w-full' : '', msg.isSelf ? 'flex-row-reverse' : 'flex-row']">
+                            <div v-if="isBatchMessageDeleteMode" class="flex-shrink-0 flex items-center self-center px-1.5 cursor-pointer" @click.stop="toggleMessageSelection(index)">
+                                <div class="w-5 h-5 rounded-lg border-2 flex items-center justify-center transition-all shadow-sm"
+                                    :class="selectedMessageIndices.has(index) ? 'bg-red-500 border-red-500 text-white' : 'border-gray-300 bg-white'">
+                                    <svg v-if="selectedMessageIndices.has(index)" class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 13l4 4L19 7"></path>
+                                    </svg>
+                                </div>
+                            </div>
                             <!-- Avatar -->
                             <div v-show="!settings.immersiveMode"
                                 :class="['flex-shrink-0 select-none', msg.shouldAnimate ? 'animate-message-fade-in' : '']">
@@ -420,7 +446,7 @@
                                 <!-- Message Bubble -->
                                 <div class="group relative"
                                     :class="{'w-full': messageUsesWideLayout(msg) || msg.isEditing_Message, 'message-edit-group': msg.isEditing_Message}">
-                                    <div @click="handleGeneratedImageReroll($event, index)"
+                                    <div :data-message-index="index" @click="handleGeneratedImageReroll($event, index); handleGeneratedImagePreviewClick($event)"
                                         :class="['p-0 rounded-2xl shadow-sm text-sm md:text-base leading-relaxed overflow-hidden',
                                         msg.shouldAnimate && !(msg.role === 'assistant' && msg.reasoning) ? 'animate-message-in' : '',
                                         messageUsesWideLayout(msg) || msg.isEditing_Message ? 'w-full' : '',
@@ -674,9 +700,20 @@
                                                 <use href="#icon-story-branch"></use>
                                             </svg>
                                         </button>
-                                        <button v-if="canDeleteMessage(index)" @click="deleteMessage(index)"
+                                        <button v-if="msg.role === 'assistant' && settings.uiTemplateEnabled" @click="regenerateMessageUiTemplate(index)"
+                                            :disabled="uiTemplateUpdateStatus.state === 'running'"
+                                            class="message-action-button"
+                                            title="重新生成此消息的UI模板">
+                                            <svg class="w-3.5 h-3.5 md:w-4 md:h-4" fill="none" stroke="currentColor"
+                                                :class="{ 'animate-spin': uiTemplateUpdateStatus.state === 'running' && uiTemplateUpdateStatus.targetMessageId === msg.id }"
+                                                viewBox="0 0 24 24">
+                                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                                    d="M4 5a2 2 0 012-2h12a2 2 0 012 2v14a2 2 0 01-2 2H6a2 2 0 01-2-2V5zm4 3h8M8 12h8M8 16h5"></path>
+                                            </svg>
+                                        </button>
+                                        <button @click="startBatchDeleteFromMessage(index)"
                                             class="message-action-button message-action-button--danger"
-                                            title="删除">
+                                            title="多选删除">
                                             <svg class="w-3.5 h-3.5 md:w-4 md:h-4" fill="none" stroke="currentColor"
                                                 viewBox="0 0 24 24">
                                                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
@@ -1203,6 +1240,152 @@
             </div>
 
             <!-- Generator View -->
+<div v-if="currentView === 'gallery'" class="management-view" @scroll="handleGalleryScroll">
+                <!-- 置顶控制区：滚动时始终可见 -->
+                <div class="sticky top-0 z-20 -mx-4 px-4 -mt-4 pt-4 pb-3 mb-1 bg-white/95 backdrop-blur-sm border-b border-gray-100">
+                    <div class="flex items-center justify-between mb-3">
+                        <div class="flex items-center min-w-0">
+                            <button @click="toggleMobileMenu"
+                                class="md:hidden mr-3 p-2 bg-white border border-gray-200 rounded-xl text-gray-500 shadow-sm active:scale-95 transition-all flex-shrink-0">
+                                <svg class="w-6 h-6" fill="none" stroke="currentColor"><use href="#icon-menu"></use></svg>
+                            </button>
+                            <h2 class="text-xl md:text-2xl font-bold text-gray-900 flex items-center min-w-0">
+                                <svg class="w-6 h-6 md:w-7 md:h-7 mr-2 text-primary-600 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"></path>
+                                </svg>
+                                <span v-if="galleryFilterChar === 'all'" class="truncate">图库</span>
+                                <span v-else class="truncate">{{ galleryFilterChar }}</span>
+                            </h2>
+                        </div>
+                        <div class="flex items-center flex-shrink-0 ml-2">
+                            <span class="text-xs text-gray-400 mr-2">{{ galleryFilterChar === 'all' ? galleryAlbums.length + ' 个相册' : filteredGallery.length + ' 张' }}</span>
+                            <button @click="galleryFilterChar === 'all' ? (albumSelectionMode = true) : (gallerySelectionMode = true)"
+                                class="px-3 py-1.5 bg-red-50 hover:bg-red-100 text-red-600 border border-red-200 rounded-lg text-xs font-bold transition-all">
+                                删除
+                            </button>
+                        </div>
+                    </div>
+
+                    <!-- 二级视图：返回按钮 + 分类切换（置顶可见） -->
+                    <div v-if="galleryFilterChar !== 'all'" class="flex items-center gap-2 mb-2">
+                        <button @click="galleryFilterChar = 'all'"
+                            class="flex-shrink-0 px-3 py-1.5 bg-gray-100 hover:bg-gray-200 text-gray-600 rounded-lg text-xs font-bold transition-all">
+                            ← 返回
+                        </button>
+                        <div class="flex gap-2 overflow-x-auto custom-scrollbar flex-1">
+                            <button v-for="group in galleryCharacters" :key="group.charName"
+                                @click="galleryFilterChar = group.charName"
+                                :class="['flex-shrink-0 px-3 py-1.5 rounded-full text-xs font-bold transition-all border', galleryFilterChar === group.charName ? 'bg-primary-600 text-white border-primary-600' : 'bg-white text-gray-500 border-gray-200 hover:border-primary-300']">
+                                {{ group.charName }}
+                            </button>
+                        </div>
+                    </div>
+
+                    <!-- 多选操作栏（置顶可见） -->
+                    <div v-if="galleryFilterChar === 'all' && albumSelectionMode" class="flex items-center justify-between bg-red-50 border border-red-200 rounded-xl px-4 py-2">
+                        <span class="text-sm font-bold text-red-700">已选 {{ albumSelected.size }} 个相册</span>
+                        <div class="flex items-center gap-1.5">
+                            <button @click="selectAllAlbums" class="px-3 py-1.5 bg-white text-gray-600 border border-gray-200 rounded-lg text-xs font-bold">全选</button>
+                            <button @click="exportSelectedAlbums" class="px-3 py-1.5 bg-emerald-600 text-white rounded-lg text-xs font-bold">保存到手机</button>
+                            <button @click="deleteSelectedAlbums" class="px-3 py-1.5 bg-red-600 text-white rounded-lg text-xs font-bold">删除</button>
+                            <button @click="cancelAlbumSelection" class="px-3 py-1.5 bg-white text-gray-600 border border-gray-200 rounded-lg text-xs font-bold">取消</button>
+                        </div>
+                    </div>
+                    <div v-if="galleryFilterChar !== 'all' && gallerySelectionMode" class="flex items-center justify-between bg-red-50 border border-red-200 rounded-xl px-4 py-2">
+                        <span class="text-sm font-bold text-red-700">已选 {{ gallerySelected.size }} 张</span>
+                        <div class="flex items-center gap-1.5">
+                            <button @click="selectAllGalleryItems" class="px-3 py-1.5 bg-white text-gray-600 border border-gray-200 rounded-lg text-xs font-bold">全选</button>
+                            <button @click="exportSelectedGalleryImages" class="px-3 py-1.5 bg-emerald-600 text-white rounded-lg text-xs font-bold">保存到手机</button>
+                            <button @click="deleteSelectedGalleryImages" class="px-3 py-1.5 bg-red-600 text-white rounded-lg text-xs font-bold">删除</button>
+                            <button @click="cancelGallerySelection" class="px-3 py-1.5 bg-white text-gray-600 border border-gray-200 rounded-lg text-xs font-bold">取消</button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 相册总览（一级：像手机相册一样显示角色卡缩略图） -->
+                <template v-if="galleryFilterChar === 'all'">
+                    <div v-if="galleryAlbums.length" class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3 md:gap-4">
+                        <div v-for="album in galleryAlbums" :key="album.charName"
+                            @mousedown="startLongPress(() => onAlbumLongPress(album))"
+                            @mouseup="cancelLongPress"
+                            @mouseleave="cancelLongPress"
+                            @touchstart="startLongPress(() => onAlbumLongPress(album))"
+                            @touchend="cancelLongPress"
+                            @touchmove="cancelLongPress"
+                            @click="handleAlbumClick(album)"
+                            class="relative gallery-touchable rounded-2xl overflow-hidden bg-white border border-gray-200 shadow-sm cursor-pointer active:scale-[0.97] transition-all select-none">
+                            <div class="grid grid-cols-2 grid-rows-2 gap-0.5 aspect-square bg-gray-100 p-0.5">
+                                <div v-for="preview in album.previews" :key="preview.id" class="overflow-hidden bg-gray-100">
+                                    <img :src="getGalleryItemDisplaySrc(preview)" loading="lazy" class="w-full h-full object-cover" :alt="album.charName">
+                                </div>
+                                <div v-for="i in Math.max(0, 4 - album.previews.length)" :key="'empty-' + i"
+                                    class="grid place-items-center bg-gray-50 text-gray-300">
+                                    <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"></path></svg>
+                                </div>
+                            </div>
+                            <div class="px-2.5 py-2">
+                                <p class="text-sm font-bold text-gray-800 truncate">{{ album.charName }}</p>
+                                <p class="text-[11px] text-gray-400">{{ album.count }} 张图片</p>
+                            </div>
+                            <span v-if="albumSelectionMode"
+                                class="absolute top-2 right-2 w-6 h-6 grid place-items-center rounded-full border-2 text-white text-xs font-bold"
+                                :class="albumSelected.has(album.charName) ? 'bg-red-600 border-red-600' : 'bg-black/30 border-white/70'">
+                                <svg v-if="albumSelected.has(album.charName)" class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 13l4 4L19 7"></path></svg>
+                            </span>
+                        </div>
+                    </div>
+                    <div v-else class="py-20 text-center text-gray-400">
+                        <svg class="w-14 h-14 mx-auto mb-3 opacity-40" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"></path>
+                        </svg>
+                        <p class="text-sm font-bold">图库还是空的</p>
+                        <p class="text-xs mt-1">点击对话中的图片预览，选择「保存到图库」即可收藏</p>
+                    </div>
+                    <p v-if="galleryCacheStats.pending > 0" class="text-center text-[11px] text-emerald-600 mt-3">
+                        正在缓存 {{ galleryCacheStats.pending }} 张图片到本地，图源失效后仍可查看...
+                    </p>
+                </template>
+
+                <!-- 分类图片（二级：点进相册后的完整图片，按日期分节） -->
+                <template v-else>
+                    <div v-if="visibleGalleryItems.length">
+                        <div v-for="section in galleryDateSections" :key="section.label">
+                            <p class="text-[11px] font-bold text-gray-400 uppercase tracking-wider mb-2 mt-4 first:mt-0">{{ section.label }}</p>
+                            <div class="grid grid-cols-3 gap-2 md:gap-3">
+                                <div v-for="item in section.items.slice(0, galleryVisibleCount)" :key="item.id"
+                                    @mousedown="startLongPress(() => onGalleryItemLongPress(item))"
+                                    @mouseup="cancelLongPress"
+                                    @mouseleave="cancelLongPress"
+                                    @touchstart="startLongPress(() => onGalleryItemLongPress(item))"
+                                    @touchend="cancelLongPress"
+                                    @touchmove="cancelLongPress"
+                                    @click="handleGalleryItemClick(item)"
+                                    class="relative gallery-touchable aspect-square rounded-xl overflow-hidden bg-gray-100 border cursor-pointer active:scale-[0.97] transition-all shadow-sm select-none"
+                                    :class="gallerySelectionMode && gallerySelected.has(item.id) ? 'border-red-500' : 'border-gray-100'"
+                                    :style="gallerySelectionMode && gallerySelected.has(item.id) ? { boxShadow: '0 0 0 2px rgb(239 68 68) inset' } : {}">
+                                    <img :src="getGalleryItemDisplaySrc(item)" loading="lazy" class="w-full h-full object-cover" :alt="item.charName">
+                                    <span v-if="item.thumb" class="absolute top-1.5 right-1.5 w-2 h-2 rounded-full bg-emerald-400 shadow" title="已缓存到本地"></span>
+                                    <span v-if="gallerySelectionMode"
+                                        class="absolute top-1.5 left-1.5 w-6 h-6 grid place-items-center rounded-full border-2 text-white text-xs font-bold"
+                                        :class="gallerySelected.has(item.id) ? 'bg-red-600 border-red-600' : 'bg-black/30 border-white/70'">
+                                        <svg v-if="gallerySelected.has(item.id)" class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 13l4 4L19 7"></path></svg>
+                                    </span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <div v-else class="py-20 text-center text-gray-400">
+                        <svg class="w-14 h-14 mx-auto mb-3 opacity-40" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"></path>
+                        </svg>
+                        <p class="text-sm font-bold">这个相册还没有图片</p>
+                    </div>
+                    <p v-if="galleryCacheStats.pending > 0" class="text-center text-[11px] text-emerald-600 mt-3">
+                        正在缓存 {{ galleryCacheStats.pending }} 张图片到本地，图源失效后仍可查看...
+                    </p>
+                </template>
+            </div>
+
             <div v-if="currentView === 'generator'" class="h-full overflow-hidden flex flex-col bg-gray-50 relative">
                 <embedded-view-content :src="generatorUrl" :loading="isGeneratorLoading"
                     loading-text="加载角色卡工坊中..." @menu="toggleMobileMenu" @load="onGeneratorLoad">
@@ -1550,10 +1733,6 @@
                                 <div class="group">
                                     <div class="mb-2 ml-1 flex items-center justify-between gap-3">
                                         <label class="text-xs font-bold text-gray-500 uppercase tracking-wider">API 提供商</label>
-                                        <a href="https://cdn.sta1n.cn/keys" target="_blank" rel="noopener noreferrer"
-                                            class="text-teal-600 hover:text-teal-700 hover:underline cursor-pointer transition-colors text-xs normal-case font-medium">
-                                            获取API
-                                        </a>
                                     </div>
                                     <div class="relative mb-2 api-provider-selector-container">
                                         <button type="button" @click="showApiProviderSelector = !showApiProviderSelector"
@@ -1969,6 +2148,37 @@
                             </div>
                         </div>
                     </div>
+                    <!-- Android 导出与文件路径 -->
+                    <div class="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden mb-6">
+                        <button @click="settings.backupSectionExpanded = !settings.backupSectionExpanded"
+                            class="w-full px-5 py-3.5 bg-gradient-to-r from-emerald-500 to-teal-500 text-white font-bold flex items-center justify-between">
+                            <div class="flex items-center">
+                                <svg class="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"></path>
+                                </svg>
+                                导出与文件路径
+                            </div>
+                            <svg class="w-5 h-5 transition-transform" :class="{ 'rotate-180': settings.backupSectionExpanded }" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path>
+                            </svg>
+                        </button>
+                        <div v-if="settings.backupSectionExpanded" class="p-5">
+                            <div v-if="isNativeApp" class="bg-gray-50/60 p-4 rounded-xl border border-gray-100">
+                                <label class="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">自定义导出路径</label>
+                                <div class="flex items-center space-x-2">
+                                    <input type="text" v-model="settings.exportPath" placeholder="默认: Download/RPHub_Exports"
+                                        class="flex-1 px-3 py-2 border border-gray-200 rounded-lg text-sm focus:outline-none focus:border-teal-400 bg-white">
+                                    <button @click="resetExportPath" class="px-3 py-2 bg-gray-100 hover:bg-gray-200 text-gray-600 rounded-lg text-sm">重置</button>
+                                </div>
+                                <div class="mt-2 text-xs text-gray-500 space-y-1">
+                                    <p>所有导出统一保存到该路径下的子目录：</p>
+                                    <p class="text-gray-400">角色卡 PNG / JSON → <span class="font-mono text-gray-600">/Characters/</span></p>
+                                    <p class="text-gray-400">对话记录 jsonl → <span class="font-mono text-gray-600">/Chats/</span></p>
+                                    <p class="text-gray-400">生成的图片 → <span class="font-mono text-gray-600">/Generated_Images/</span></p>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
 
                 </div>
             </div>
@@ -1986,7 +2196,7 @@
                     </button>
                     <label class="settings-icon-button cursor-pointer" title="导入预设">
                         <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><use href="#icon-import"></use></svg>
-                        <input type="file" accept=".json" @change="importPresets" class="hidden">
+                        <input type="file" accept=".json,application/json,text/plain" @change="importPresets" class="hidden">
                     </label>
                     <button @click="createPreset" class="settings-create-button" title="新建预设">
                         <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -2068,7 +2278,7 @@
                     </button>
                     <label class="settings-icon-button cursor-pointer" title="导入">
                         <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><use href="#icon-import"></use></svg>
-                        <input type="file" accept=".json" @change="importRegex" class="hidden">
+                        <input type="file" accept=".json,application/json,text/plain" @change="importRegex" class="hidden">
                     </label>
                     <button @click="createRegex" class="settings-create-button" title="新建脚本">
                         <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -2633,7 +2843,7 @@
                     </button>
                     <label class="settings-icon-button cursor-pointer" title="导入">
                         <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><use href="#icon-import"></use></svg>
-                        <input type="file" accept=".json" @change="importWorldInfo" class="hidden">
+                        <input type="file" accept=".json,application/json,text/plain" @change="importWorldInfo" class="hidden">
                     </label>
                     <button @click="createWorldInfo" class="settings-create-button" title="新建条目">
                         <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -2835,6 +3045,40 @@
             @close-name-editor="showStoryBranchNameEditor = false" @update:name-draft="storyBranchNameDraft = $event"
             @save-name="saveStoryBranchName"></story-branch-modal>
 
+        <!-- 相册预览灯箱 (迁移) -->
+<div v-if="showGalleryPreview" class="fixed inset-0 z-[95] flex flex-col bg-black/95 animate-fade-in">
+                <div class="flex items-center justify-between p-4 text-white flex-shrink-0">
+                    <span class="text-sm font-bold">图片预览</span>
+                    <button @click="closeGalleryPreview" class="w-9 h-9 grid place-items-center rounded-full bg-white/10 hover:bg-white/20 text-white" title="关闭">
+                        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
+                    </button>
+                </div>
+                <div class="flex-1 min-h-0 flex items-center justify-center p-4" @click.self="closeGalleryPreview">
+                    <img :src="galleryPreviewSrc" class="max-w-full max-h-full object-contain rounded-lg shadow-2xl" alt="预览">
+                </div>
+                <div class="p-4 pb-[max(16px,env(safe-area-inset-bottom))] flex-shrink-0">
+                    <button @click="confirmGalleryImageSave" class="w-full h-12 rounded-xl bg-primary-600 text-white font-bold active:scale-[0.98] transition-transform">保存到本地</button>
+                </div>
+            </div>
+
+        <!-- 生图预览灯箱 (迁移) -->
+<div v-if="showGeneratedImagePreview" @click.self="closeGeneratedImagePreview"
+            class="fixed inset-0 z-[95] flex flex-col bg-black/90 animate-fade-in">
+            <div class="flex items-center justify-between px-4 py-3 text-white flex-shrink-0">
+                <span class="text-sm font-bold">图片预览</span>
+                <button @click="closeGeneratedImagePreview" class="w-10 h-10 grid place-items-center rounded-full bg-white/10" title="关闭预览">
+                    <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
+                </button>
+            </div>
+            <div class="flex-1 min-h-0 p-3 flex items-center justify-center" @click.self="closeGeneratedImagePreview">
+                <img :src="generatedImagePreviewSrc" class="max-w-full max-h-full object-contain rounded-lg" alt="生成图片大图预览">
+            </div>
+            <div class="p-3 pb-[max(12px,env(safe-area-inset-bottom))] flex-shrink-0 space-y-2">
+                <button @click="saveGeneratedImagePreviewToGallery" class="w-full h-12 rounded-xl bg-emerald-600 text-white font-bold active:scale-[0.98] transition-transform">保存到图库</button>
+                <button @click="confirmGeneratedImageSave" class="w-full h-12 rounded-xl bg-primary-600 text-white font-bold active:scale-[0.98] transition-transform">保存到相册</button>
+            </div>
+        </div>
+
         <retry-confirm-modal :state="globalConfirmModal"></retry-confirm-modal>
 
     </div>
@@ -2848,6 +3092,12 @@
         document.write('<script src="assets/js/update-check.js?v=' + new Date().getTime() + '"><\/script>');
         document.write('<script src="assets/js/ui-components.js?v=' + new Date().getTime() + '"><\/script>');
         document.write('<script src="assets/js/app.js?v=' + new Date().getTime() + '"><\/script>');
+    </script>
+    <script>
+        // 仅在 https 下注册 Service Worker：本地 file:// 或 http 调试时不注册
+        if ('serviceWorker' in navigator && location.protocol === 'https:') {
+            window.addEventListener('load', () => navigator.serviceWorker.register('./sw.js').catch(() => {}));
+        }
     </script>
 </body>
 

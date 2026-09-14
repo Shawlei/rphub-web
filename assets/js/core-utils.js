@@ -891,25 +891,163 @@ window.RPHubUtils = {
         img.src = src;
     });
 
-    const downloadBlob = (blob, filename, options = {}) => {
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = filename;
-        if (options.targetBlank) a.target = '_blank';
-        a.style.display = 'none';
-        document.body.appendChild(a);
-        a.click();
-
-        const cleanup = () => {
-            if (a.parentNode) a.parentNode.removeChild(a);
-            URL.revokeObjectURL(url);
+    const blobToBase64 = (blob) => new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onloadend = () => {
+            const result = String(reader.result || '');
+            const comma = result.indexOf(',');
+            resolve(comma >= 0 ? result.slice(comma + 1) : result);
         };
-        const delay = Number(options.revokeDelay || 0);
-        if (delay > 0) {
-            setTimeout(cleanup, delay);
-        } else {
-            cleanup();
+        reader.onerror = () => reject(reader.error);
+        reader.readAsDataURL(blob);
+    });
+
+    const LARGE_PAYLOAD_CHUNK_THRESHOLD = 256 * 1024; // 256KB
+    const FILESYSTEM_WRITE_CHUNK_SIZE = 256 * 1024; // 256KB per bridge call
+    const DEFAULT_EXPORT_BASENAME = 'Download/RPHub_Exports';
+
+    const normalizeCustomExportPath = (rawPath) => {
+        const trimmed = String(rawPath || '').trim();
+        if (!trimmed) return null;
+        const root = '/storage/emulated/0/';
+        if (trimmed === root.replace(/\/$/, '')) return '';
+        if (trimmed.startsWith(root)) return trimmed.slice(root.length);
+        if (trimmed.startsWith('/sdcard/')) return trimmed.slice('/sdcard/'.length);
+        return trimmed;
+    };
+
+    const resolveExportTarget = (filename, subDir = '') => {
+        const custom = normalizeCustomExportPath(window.RPHubExportPath);
+        const base = custom || DEFAULT_EXPORT_BASENAME;
+        const parts = [base];
+        if (subDir) parts.push(subDir);
+        parts.push(filename);
+        const relativePath = parts.join('/').replace(/\/+/g, '/');
+        return { directory: 'EXTERNAL_STORAGE', path: relativePath };
+    };
+
+    const writeTextFileInChunks = async (text, target, options = {}) => {
+        const Filesystem = window.Capacitor?.Plugins?.Filesystem;
+        if (!Filesystem) throw new Error('Filesystem plugin unavailable');
+        const directory = (typeof target === 'string' ? 'EXTERNAL_STORAGE' : target?.directory) || 'EXTERNAL_STORAGE';
+        const path = (typeof target === 'string' ? target : target?.path);
+        if (!path) throw new Error('Filesystem write target path is required');
+
+        await Filesystem.writeFile({
+            path,
+            data: text.slice(0, FILESYSTEM_WRITE_CHUNK_SIZE),
+            directory,
+            encoding: 'utf8',
+            recursive: true,
+            append: false
+        });
+
+        for (let offset = FILESYSTEM_WRITE_CHUNK_SIZE; offset < text.length; offset += FILESYSTEM_WRITE_CHUNK_SIZE) {
+            await Filesystem.writeFile({
+                path,
+                data: text.slice(offset, offset + FILESYSTEM_WRITE_CHUNK_SIZE),
+                directory,
+                encoding: 'utf8',
+                append: true
+            });
+            if (typeof options.onProgress === 'function') {
+                options.onProgress(Math.min(1, (offset + FILESYSTEM_WRITE_CHUNK_SIZE) / text.length));
+            }
+        }
+        return { success: true, path, directory };
+    };
+
+    const downloadBlob = async (blob, filename, options = {}) => {
+        const safeName = String(filename || 'export.bin').replace(/[\\/:*?"<>|]/g, '_');
+        const subDir = options.subDir || 'Exports';
+        const isTextBlob = !options.forceBinary && (/^(text\/|application\/json|application\/x-ndjson)/i.test(blob.type || '') || /\.(json|jsonl|txt|md|csv)$/i.test(safeName));
+        const isLargePayload = blob.size >= LARGE_PAYLOAD_CHUNK_THRESHOLD;
+
+        if (isTextBlob && isLargePayload && window.Capacitor?.Plugins?.Filesystem) {
+            try {
+                const text = await blob.text();
+                const result = await writeTextFileInChunks(text, resolveExportTarget(safeName, subDir), { onProgress: options.onProgress });
+                if (result && window.Capacitor?.Plugins?.ExportPath) {
+                    try {
+                        await window.Capacitor.Plugins.ExportPath.registerFile({
+                            path: result.path || resolveExportTarget(safeName, subDir).path,
+                            mimeType: /json/i.test(blob.type || safeName) ? 'application/json' : (blob.type?.split(';')[0] || 'application/octet-stream')
+                        });
+                    } catch (registerError) {
+                        console.warn('Export file registration failed:', registerError);
+                    }
+                }
+                if (typeof options.onSuccess === 'function') options.onSuccess(result);
+                return result;
+            } catch (err) {
+                console.log('Chunked filesystem write failed, trying other paths:', err);
+            }
+        }
+
+        try {
+            if (window.Capacitor?.Plugins?.ExportPath) {
+                const lower = safeName.toLowerCase();
+                const data = (lower.endsWith('.png') || lower.endsWith('.jpg') || lower.endsWith('.jpeg'))
+                    ? await blobToBase64(blob)
+                    : await blob.text();
+                const result = await window.Capacitor.Plugins.ExportPath.saveFile({ filename: safeName, data, subDir });
+                if (result?.success) {
+                    if (typeof options.onSuccess === 'function') options.onSuccess(result);
+                    return result;
+                }
+            }
+        } catch (err) {
+            console.log('ExportPath failed, trying Filesystem/browser download:', err);
+        }
+
+        try {
+            if (window.Capacitor?.Plugins?.Filesystem) {
+                const target = resolveExportTarget(safeName, subDir);
+                const result = isTextBlob
+                    ? await writeTextFileInChunks(await blob.text(), target, { onProgress: options.onProgress })
+                    : await window.Capacitor.Plugins.Filesystem.writeFile({
+                        path: target.path,
+                        data: await blobToBase64(blob),
+                        directory: target.directory,
+                        recursive: true
+                    });
+                if (result) {
+                    if (typeof options.onSuccess === 'function') options.onSuccess(result);
+                    return result;
+                }
+            }
+        } catch (err) {
+            console.log('Filesystem write failed:', err);
+        }
+
+                // On Android / Capacitor, do NOT trigger a.click() navigation as it crashes WebView
+        if (window.Capacitor?.Plugins?.Filesystem || window.Capacitor?.isNativePlatform?.()) {
+            return { success: true, native: true };
+        }
+
+let url;
+        try {
+            url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = safeName;
+            if (options.targetBlank) a.target = '_blank';
+            a.style.display = 'none';
+            document.body.appendChild(a);
+            a.click();
+            const cleanup = () => {
+                if (a.parentNode) a.parentNode.removeChild(a);
+                if (url) URL.revokeObjectURL(url);
+            };
+            const delay = Number(options.revokeDelay || 500);
+            if (delay > 0) setTimeout(cleanup, delay);
+            else cleanup();
+            if (typeof options.onSuccess === 'function') options.onSuccess({ success: true, fallback: true });
+            return { success: true, fallback: true };
+        } catch (err) {
+            if (url) { try { URL.revokeObjectURL(url); } catch (_) { } }
+            console.error('Browser download failed:', err);
+            throw err;
         }
     };
 
@@ -951,9 +1089,9 @@ window.RPHubUtils = {
         systemRegexNames: Object.freeze(['NAI画图正则']),
         systemWorldInfoNames: Object.freeze(['自动生图']),
         imageGenBaseUrl: 'https://nai.sta1n.cn',
-        defaultApiProviderId: 'sta1n',
+        defaultApiProviderId: 'deepseek',
         defaultApiConfig: Object.freeze({
-            apiUrl: 'https://cdn.sta1n.cn/v1',
+            apiUrl: 'https://api.deepseek.com/v1',
             apiKey: '',
             model: '',
             qualityModel: '',
@@ -961,12 +1099,6 @@ window.RPHubUtils = {
             fastModel: ''
         }),
         apiProviderOptions: Object.freeze([
-            Object.freeze({
-                id: 'sta1n',
-                name: 'STA1N API',
-                apiUrl: 'https://cdn.sta1n.cn/v1',
-                icon: 'https://picui.ogmua.cn/s1/2026/08/21/6a87a751bf871.webp'
-            }),
             Object.freeze({
                 id: 'deepseek',
                 name: 'DeepSeek',

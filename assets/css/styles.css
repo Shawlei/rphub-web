@@ -2970,3 +2970,10 @@ opacity: 0;
     }
 
 }
+
+/* ---- Android 优化：图库长按禁用系统选择 ---- */
+.gallery-touchable {
+    -webkit-touch-callout: none;
+    -webkit-user-select: none;
+    user-select: none;
+}

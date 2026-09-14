@@ -630,6 +630,8 @@ const app = createApp({
             imageGenKey: '',
             imageStyle: 'vertical',
             customImageArtists: '',
+            exportPath: '',
+            backupSectionExpanded: false,
             imageModel: 'nai-diffusion-4-5-full',
             imageSize: '竖图',
             imageGenCount: 2,
@@ -945,6 +947,52 @@ const app = createApp({
         const showAddCharacterMenu = ref(false);
         const currentCharacterIndex = ref(-1);
         const switchingCharacterIndex = ref(-1);
+        // 切换过程超时护栏。
+        // 原实现用 watch(ref) 监听“值变化”来武装定时器，存在两个致命漏洞：
+        //   1) watch 对“赋相同值”不触发——若已卡在 index N，用户再点第 N 张卡不会重新武装定时器；
+        //   2) 它只能复位 switchingCharacterIndex，无法覆盖组件内 importing 卡死的来源
+        //      （busy = importing || loadingIndex >= 0，两个来源都必须归零）。
+        // 因此改为在 selectCharacter 里按 epoch 显式武装/解除，赋相同值也能重新武装。
+        const SWITCH_OVERALL_TIMEOUT_MS = 20000;
+        const SWITCH_STEP_TIMEOUT_MS = 8000;
+        let _switchWatchdogTimer = null;
+        let _switchWatchdogEpoch = -1;
+        const armSwitchWatchdog = (epoch) => {
+            if (_switchWatchdogTimer) clearTimeout(_switchWatchdogTimer);
+            _switchWatchdogEpoch = epoch;
+            _switchWatchdogTimer = setTimeout(() => {
+                if (_switchWatchdogEpoch !== epoch) return;
+                // 关键：切换链路里的 await 可能因 IndexedDB 事务永不落定而永久挂起，
+                // 超时后必须无条件把界面状态归零，否则用户会永久卡在“正在切换”。
+                if (switchingCharacterIndex.value !== -1) {
+                    console.warn('character switch stuck, force unlock');
+                }
+                switchingCharacterIndex.value = -1;
+            }, SWITCH_OVERALL_TIMEOUT_MS);
+        };
+        const disarmSwitchWatchdog = (epoch) => {
+            if (_switchWatchdogEpoch !== epoch) return;
+            clearTimeout(_switchWatchdogTimer);
+            _switchWatchdogTimer = null;
+            _switchWatchdogEpoch = -1;
+        };
+        // 通用超时护栏：任何可能因 IndexedDB 事务/连接异常而永不落定的 promise，
+        // 都经过此函数，保证最多等待 ms 毫秒即返回结果对象，绝不让调用方永久挂起。
+        // 返回 { ok: true, value } 或 { ok: false, error | timedOut }，本身永不 reject。
+        const withTimeoutResult = (promise, ms = SWITCH_STEP_TIMEOUT_MS, label = '') => {
+            let timer = null;
+            const guard = new Promise(resolve => {
+                timer = setTimeout(() => {
+                    console.warn(`[switch-guard] ${label || 'async step'} 超时（${ms}ms），继续后续流程`);
+                    resolve({ ok: false, timedOut: true });
+                }, ms);
+            });
+            const wrapped = Promise.resolve(promise).then(
+                value => ({ ok: true, value }),
+                error => ({ ok: false, error })
+            );
+            return Promise.race([wrapped, guard]).finally(() => clearTimeout(timer));
+        };
 
         const chatHistory = ref([]);
         const CHAT_RENDER_INITIAL_LIMIT = 20;
@@ -1644,6 +1692,10 @@ const app = createApp({
         let chatHistorySaveTimer = null;
         let chatHistorySaveQueue = Promise.resolve(true);
         let lastChatSaveErrorToastAt = 0;
+        // 聊天记录保存队列的整体超时。IndexedDB 事务在连接关闭/被阻塞/versionchange 时
+        // 可能既不触发 onsuccess 也不触发 onerror，导致某个 saveTask 永久 pending；
+        // 由于队列是 chain.then(saveTask)，一旦被污染，后续所有 await 都会永久挂起。
+        const CHAT_SAVE_TIMEOUT_MS = 12000;
 
         const isRetryableChatStorageError = (error) => {
             const name = String(error?.name || '');
@@ -1688,7 +1740,28 @@ const app = createApp({
                     return false;
                 };
 
-                chatHistorySaveQueue = chatHistorySaveQueue.then(saveTask, saveTask);
+                const guardedSaveTask = () => {
+                    let taskTimeoutId = null;
+                    return Promise.race([
+                        saveTask(),
+                        new Promise(resolve => {
+                            taskTimeoutId = setTimeout(() => {
+                                console.warn('chat history save task timed out, releasing queue');
+                                resolve(false);
+                            }, CHAT_SAVE_TIMEOUT_MS);
+                        })
+                    ]).finally(() => clearTimeout(taskTimeoutId)); // 关键：无论保存成功还是失败都必须清掉超时定时器，否则正常保存也会误报 timed out，污染复发时的取证日志
+                };
+                // 自愈：对“上一个环节”也加超时等待，避免某个已卡死的旧环节永久阻塞新环节。
+                // 这样即使 chatHistorySaveQueue 曾被污染，下一次调用也能在有限时间内重建出可用的队尾。
+                const previous = chatHistorySaveQueue;
+                let queueTimeoutId = null;
+                chatHistorySaveQueue = Promise.race([
+                    previous.then(guardedSaveTask, guardedSaveTask),
+                    new Promise(resolve => {
+                        queueTimeoutId = setTimeout(() => resolve(false), CHAT_SAVE_TIMEOUT_MS);
+                    })
+                ]).finally(() => clearTimeout(queueTimeoutId)); // 关键：清理定时器不等于取消护栏——真卡死时仍会超时释放队列，仅成功后不误报、不泄漏定时器
                 return chatHistorySaveQueue;
             } catch (error) {
                 notifyChatSaveFailure(error);
@@ -1710,7 +1783,11 @@ const app = createApp({
                 await saveChatHistoryNow();
                 return;
             }
-            await chatHistorySaveQueue;
+            // 关键：即便队列已被污染，也不能让角色切换永久挂起。
+            await Promise.race([
+                chatHistorySaveQueue.catch(() => false),
+                new Promise(resolve => setTimeout(() => resolve(false), CHAT_SAVE_TIMEOUT_MS))
+            ]);
         };
 
         const saveMemorySettingsNow = async () => {
@@ -1740,6 +1817,472 @@ const app = createApp({
         const saveCharactersNow = async () => {
             if (!getMainDb()) await initDB();
             await setStoredValue('characters', unwrapForStorage(characters.value), { clone: false });
+        };
+
+        // ==== Android 自定义导出路径 ====
+        // 是否运行在原生壳（Capacitor/Cordova）内。浏览器中为 false，
+        // 用于隐藏"自定义导出路径"等 Android 专属设置项。
+        const isNativeApp = !!(window.Capacitor?.isNativePlatform?.());
+        const applyExportPath = async (path, { silent = false } = {}) => {
+            try {
+                if (window.Capacitor?.Plugins?.ExportPath) {
+                    const result = await window.Capacitor.Plugins.ExportPath.setExportPath({ path: path || '' });
+                    window.RPHubExportPath = result?.isDefault ? '' : (path || '').trim();
+                    return true;
+                }
+            } catch (err) {
+                console.log('ExportPath plugin not available:', err);
+                if (!silent) showToast('设置导出路径失败', 'error');
+            }
+            return false;
+        };
+        const resetExportPath = async () => {
+            settings.exportPath = '';
+            await applyExportPath('');
+            showToast('已恢复默认导出路径', 'success');
+        };
+        let _exportPathSyncTimer = null;
+        watch(() => settings.exportPath, (path) => {
+            if (!_initComplete) return;
+            clearTimeout(_exportPathSyncTimer);
+            _exportPathSyncTimer = setTimeout(() => applyExportPath(path, { silent: true }), 600);
+        });
+
+        // ==== 图库 / 相册 + 生图预览 (迁移) ====
+        const showGeneratedImagePreview = ref(false);
+        const generatedImagePreviewSrc = ref('');
+        const getGeneratedImageElement = target => {
+            if (!(target instanceof Element)) return null;
+            const card = target.closest('.generated-image-card');
+            if (!card) return null;
+            const image = card.querySelector('img');
+            if (!image) return null;
+            const src = String(image.currentSrc || image.src || '');
+            if (!src || src === window.location.href) return null;
+            return image;
+        };
+        const saveGeneratedImage = async image => {
+            const src = String(image?.currentSrc || image?.src || '');
+            if (!src) throw new Error('图片地址为空');
+            let blob;
+            try {
+                const response = await fetch(src, { cache: 'force-cache' });
+                if (!response.ok) throw new Error(`图片请求失败 (${response.status})`);
+                blob = await response.blob();
+            } catch (fetchError) {
+                try {
+                    const pngBytes = await cardUtils.imageUrlToPngBytes(src, { crossOrigin: 'Anonymous' });
+                    blob = new Blob([pngBytes], { type: 'image/png' });
+                } catch (_) { throw fetchError; }
+            }
+            const extension = blob.type === 'image/jpeg' ? 'jpg' : blob.type === 'image/webp' ? 'webp' : 'png';
+            const characterName = String(currentCharacter.value?.name || 'generated_image').replace(/[\\/:*?"<>|]/g, '_');
+            const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+            await cardUtils.downloadBlob(blob, `${characterName}_${timestamp}.${extension}`, { subDir: 'Generated_Images' });
+            showToast('图片已保存到本地', 'success');
+        };
+        const saveToGallery = (src) => {
+            const source = String(src || '').trim();
+            if (!source) return;
+            if (!addImageToGallery(source, currentCharacter.value)) {
+                showToast('这张图片已经在图库里了', 'info');
+                return;
+            }
+            showToast('已保存到图库', 'success');
+        };
+        const saveGeneratedImagePreviewToGallery = () => {
+            const src = generatedImagePreviewSrc.value;
+            if (!src) return;
+            saveToGallery(src);
+            closeGeneratedImagePreview();
+        };
+        const openGeneratedImagePreview = image => {
+            generatedImagePreviewSrc.value = String(image?.currentSrc || image?.src || '');
+            showGeneratedImagePreview.value = !!generatedImagePreviewSrc.value;
+        };
+        const closeGeneratedImagePreview = () => {
+            generatedImagePreviewSrc.value = '';
+            showGeneratedImagePreview.value = false;
+        };
+        const confirmGeneratedImageSave = async () => {
+            const src = generatedImagePreviewSrc.value;
+            if (!src) return;
+            closeGeneratedImagePreview();
+            try {
+                showToast('正在保存图片...', 'info');
+                await saveGeneratedImage({ src });
+            } catch (error) {
+                console.error('Generated image save failed:', error);
+                showToast('图片保存失败: ' + (error.message || error), 'error');
+            }
+        };
+        const handleGeneratedImagePreviewClick = event => {
+            // 点击 reroll 按钮时不打开预览，交给 upstream 的 handleGeneratedImageReroll
+            if (event.target.closest('.generated-image-reroll')) return;
+            const image = getGeneratedImageElement(event.target);
+            if (!image) return;
+            event.preventDefault();
+            event.stopPropagation();
+            openGeneratedImagePreview(image);
+        };
+        // ---- 图库：按角色卡分类保存对话中生成的图片 ----
+        const imageGallery = ref([]);
+        const galleryFilterChar = ref('all');
+        const galleryPreviewSrc = ref('');
+        const showGalleryPreview = ref(false);
+        let galleryMeta = { migrated: false, deletedSrcs: [] };
+        let _galleryMetaLoaded = false;
+        const loadGalleryMeta = async () => {
+            try {
+                const saved = await getStoredValue('image_gallery_meta');
+                if (saved && typeof saved === 'object') {
+                    galleryMeta = {
+                        migrated: saved.migrated === true,
+                        deletedSrcs: Array.isArray(saved.deletedSrcs) ? saved.deletedSrcs : []
+                    };
+                }
+            } catch (err) { console.error('Load gallery meta failed:', err); }
+            _galleryMetaLoaded = true;
+        };
+        const saveGalleryMeta = async () => {
+            try {
+                if (!getMainDb()) await initDB();
+                await setStoredValue('image_gallery_meta', {
+                    migrated: galleryMeta.migrated,
+                    deletedSrcs: galleryMeta.deletedSrcs.slice(-5000)
+                }, { clone: false });
+            } catch (err) { console.error('Save gallery meta failed:', err); }
+        };
+        const markGallerySrcDeleted = (srcs) => {
+            const deleted = new Set(galleryMeta.deletedSrcs);
+            srcs.forEach(src => { const s = String(src || ''); if (s) deleted.add(s); });
+            galleryMeta.deletedSrcs = [...deleted].slice(-5000);
+            saveGalleryMeta();
+        };
+        const GALLERY_CACHE_SINGLE_LIMIT = 2 * 1024 * 1024;
+        const galleryCacheStats = ref({ cached: 0, bytes: 0, pending: 0, failed: 0 });
+        let _galleryCacheSaveTimer = null;
+        let _galleryCaching = new Set();
+        let _galleryCacheQueue = [];
+        let _galleryCacheActive = 0;
+        const refreshGalleryCacheStats = () => {
+            let bytes = 0, cached = 0;
+            imageGallery.value.forEach(item => { if (item.thumb) { cached++; bytes += item.thumb.length; } });
+            galleryCacheStats.value = { cached, bytes, pending: _galleryCacheQueue.length, failed: 0 };
+        };
+        const fetchImageAsDataUrl = async (src) => {
+            const timeoutController = new AbortController();
+            const timeoutHandle = setTimeout(() => timeoutController.abort(), 30000);
+            try {
+                const response = await fetch(src, { cache: 'force-cache', signal: timeoutController.signal });
+                if (!response.ok) throw new Error(`HTTP ${response.status}`);
+                const blob = await response.blob();
+                if (blob.size > GALLERY_CACHE_SINGLE_LIMIT) throw new Error('图片过大，跳过缓存');
+                const reader = new FileReader();
+                return await new Promise((resolve, reject) => {
+                    reader.onload = () => resolve(reader.result);
+                    reader.onerror = () => reject(reader.error);
+                    reader.readAsDataURL(blob);
+                });
+            } finally { clearTimeout(timeoutHandle); }
+        };
+        const createThumbnail = async (dataUrl, maxSize = 240) => {
+            try {
+                const img = await new Promise((resolve, reject) => {
+                    const image = new Image();
+                    image.onload = () => resolve(image);
+                    image.onerror = () => reject(new Error('decode failed'));
+                    image.src = dataUrl;
+                });
+                const scale = Math.min(1, maxSize / Math.max(img.naturalWidth || 1, img.naturalHeight || 1));
+                const w = Math.max(1, Math.round((img.naturalWidth || 1) * scale));
+                const h = Math.max(1, Math.round((img.naturalHeight || 1) * scale));
+                const canvas = document.createElement('canvas');
+                canvas.width = w; canvas.height = h;
+                canvas.getContext('2d').drawImage(img, 0, 0, w, h);
+                return canvas.toDataURL('image/jpeg', 0.72);
+            } catch (err) { console.warn('[Gallery] 缩略图生成失败:', err?.message || err); return null; }
+        };
+        const scheduleGalleryCacheSave = () => {
+            if (_galleryCacheSaveTimer) clearTimeout(_galleryCacheSaveTimer);
+            _galleryCacheSaveTimer = setTimeout(() => { _galleryCacheSaveTimer = null; saveImageGallery(); refreshGalleryCacheStats(); }, 1200);
+        };
+        let _cacheBatch = [];
+        let _cacheBatchTimer = null;
+        const flushCacheBatch = () => {
+            _cacheBatchTimer = null;
+            if (!_cacheBatch.length) return;
+            const batch = _cacheBatch.splice(0, 8);
+            batch.forEach(({ id, thumb }) => { const item = imageGallery.value.find(i => i.id === id); if (item && thumb) item.thumb = thumb; });
+            if (_cacheBatch.length) { _cacheBatchTimer = setTimeout(flushCacheBatch, 600); }
+            else { scheduleGalleryCacheSave(); refreshGalleryCacheStats(); }
+        };
+        const cacheImageForItem = async (item) => {
+            if (!item || item.hasCache || _galleryCaching.has(item.id)) return;
+            if (!/^https?:/.test(String(item.src || ''))) return;
+            _galleryCaching.add(item.id);
+            try {
+                const dataUrl = await fetchImageAsDataUrl(item.src);
+                if (!imageGallery.value.some(i => i.id === item.id)) return;
+                await saveGalleryCacheData(item.id, dataUrl);
+                const thumb = await createThumbnail(dataUrl);
+                if (thumb) await saveGalleryThumb(item.id, thumb);
+                const existing = imageGallery.value.find(i => i.id === item.id);
+                if (existing) existing.hasCache = true;
+                _cacheBatch.push({ id: item.id, thumb });
+                if (!_cacheBatchTimer) _cacheBatchTimer = setTimeout(flushCacheBatch, 600);
+            } catch (err) {
+                console.warn('[Gallery] 图片缓存失败:', String(item.src).split('?')[0], err?.message || err);
+                item._cacheFailed = true;
+            } finally { _galleryCaching.delete(item.id); }
+        };
+        const startGalleryCacheQueue = () => {
+            const concurrency = 2;
+            const pump = () => {
+                while (_galleryCacheActive < concurrency && _galleryCacheQueue.length) {
+                    const item = _galleryCacheQueue.shift();
+                    if (!item || item.hasCache) continue;
+                    _galleryCacheActive++;
+                    cacheImageForItem(item).finally(() => { _galleryCacheActive--; refreshGalleryCacheStats(); setTimeout(pump, 80); });
+                }
+            };
+            pump();
+        };
+        const ensureGalleryCached = () => {
+            const uncached = imageGallery.value.filter(item => !item.hasCache && !item._cacheFailed && /^https?:/.test(String(item.src || '')));
+            const existing = new Set(_galleryCacheQueue.map(i => i.id));
+            const queued = new Set(_galleryCaching);
+            uncached.forEach(item => { if (!existing.has(item.id) && !queued.has(item.id)) _galleryCacheQueue.push(item); });
+            if (_galleryCacheQueue.length) { refreshGalleryCacheStats(); startGalleryCacheQueue(); }
+        };
+        const getGalleryItemDisplaySrc = item => (item && (item.thumb || item.src)) || '';
+        const saveImageGallery = async () => {
+            try {
+                if (!getMainDb()) await initDB();
+                const plain = imageGallery.value.map(item => { const { thumb, _cacheFailed, ...rest } = item; return { ...rest, hasCache: !!item.hasCache }; });
+                await setStoredValue('image_gallery', plain, { clone: false });
+            } catch (err) { console.error('Save image gallery failed:', err); }
+        };
+        const saveGalleryCacheData = async (id, dataUrl) => {
+            try { if (!getMainDb()) await initDB(); await setStoredValue('image_gallery_cache_' + id, dataUrl, { clone: false }); }
+            catch (err) { console.error('Save gallery cache data failed:', err); }
+        };
+        const saveGalleryThumb = async (id, thumb) => {
+            try { if (!getMainDb()) await initDB(); await setStoredValue('image_gallery_thumb_' + id, thumb, { clone: false }); }
+            catch (err) { console.error('Save gallery thumb failed:', err); }
+        };
+        const getGalleryCacheData = async (id) => { try { return await getStoredValue('image_gallery_cache_' + id); } catch (err) { return null; } };
+        const getGalleryThumb = async (id) => {
+            try {
+                const thumb = await getStoredValue('image_gallery_thumb_' + id);
+                if (typeof thumb === 'string') return thumb;
+                const full = await getStoredValue('image_gallery_cache_' + id);
+                if (typeof full === 'string') { const created = await createThumbnail(full); if (created) { saveGalleryThumb(id, created); return created; } }
+                return null;
+            } catch (err) { return null; }
+        };
+        const deleteGalleryCacheData = async (id) => {
+            try { if (!getMainDb()) await initDB(); await deleteStoredValue('image_gallery_cache_' + id); await deleteStoredValue('image_gallery_thumb_' + id); }
+            catch (err) { console.error('Delete gallery cache data failed:', err); }
+        };
+        const migrateLegacyGalleryCache = async (item, legacyDataUrl) => {
+            await saveGalleryCacheData(item.id, legacyDataUrl);
+            const thumb = await createThumbnail(legacyDataUrl);
+            if (thumb) { await saveGalleryThumb(item.id, thumb); const current = imageGallery.value.find(i => i.id === item.id); if (current) { current.thumb = thumb; refreshGalleryCacheStats(); } }
+            scheduleGalleryCacheSave();
+        };
+        const loadImageGallery = async () => {
+            try {
+                const saved = await getStoredValue('image_gallery');
+                if (Array.isArray(saved)) {
+                    imageGallery.value = saved.map(item => {
+                        if (item.cached && typeof item.cached === 'string') { const legacy = item.cached; const migrated = { ...item, cached: null, thumb: null, hasCache: true }; migrateLegacyGalleryCache(migrated, legacy); return migrated; }
+                        return { ...item, cached: null, thumb: null, hasCache: item.hasCache === true };
+                    });
+                    const thumbItems = imageGallery.value.filter(item => item.hasCache && !item.thumb);
+                    const CHUNK = 30;
+                    for (let i = 0; i < thumbItems.length; i += CHUNK) {
+                        await Promise.all(thumbItems.slice(i, i + CHUNK).map(async item => { const thumb = await getGalleryThumb(item.id); if (thumb) item.thumb = thumb; }));
+                        if (i + CHUNK < thumbItems.length) await new Promise(resolve => setTimeout(resolve, 0));
+                    }
+                }
+            } catch (err) { console.error('Load image gallery failed:', err); }
+            refreshGalleryCacheStats();
+        };
+        const addImageToGallery = (src, char, messageId = null) => {
+            const source = String(src || '').trim();
+            if (!source || !/^https?:|^data:image\//.test(source)) return false;
+            if (imageGallery.value.some(item => item.src === source)) return false;
+            imageGallery.value.unshift({
+                id: generateUUID(), src: source,
+                charUuid: char?.uuid || currentCharacter.value?.uuid || '',
+                charName: char?.name || currentCharacter.value?.name || '未知角色',
+                messageId: messageId || null, createdAt: Date.now()
+            });
+            if (imageGallery.value.length > 2000) imageGallery.value.length = 2000;
+            saveImageGallery();
+            refreshGalleryCacheStats();
+            const newItem = imageGallery.value[0];
+            if (newItem && /^https?:/.test(source)) { _galleryCacheQueue.push(newItem); startGalleryCacheQueue(); }
+            return true;
+        };
+        let _galleryCacheDelayTimer = null;
+        const openGallery = () => {
+            currentView.value = 'gallery';
+            closeMobileMenu();
+            const arm = () => { if (_galleryCacheDelayTimer) clearTimeout(_galleryCacheDelayTimer); _galleryCacheDelayTimer = setTimeout(() => ensureGalleryCached(), 3000); };
+            if (_galleryMetaLoaded) arm(); else loadGalleryMeta().then(arm);
+        };
+        // 侧边栏点击“图库”走 selectView 切换 currentView，这里补触发缓存加载
+        watch(currentView, (view) => { if (view === 'gallery') openGallery(); });
+        let _galleryPreviewToken = 0;
+        const openGalleryPreview = async (item) => {
+            const token = ++_galleryPreviewToken;
+            galleryPreviewSrc.value = getGalleryItemDisplaySrc(item);
+            showGalleryPreview.value = true;
+            if (item && item.hasCache) {
+                try { const full = await getGalleryCacheData(item.id); if (token === _galleryPreviewToken && full && typeof full === 'string') galleryPreviewSrc.value = full; }
+                catch (err) { console.warn('Gallery full image load failed:', err); }
+            }
+        };
+        const closeGalleryPreview = () => { galleryPreviewSrc.value = ''; showGalleryPreview.value = false; };
+        const confirmGalleryImageSave = async () => {
+            const src = galleryPreviewSrc.value;
+            if (!src) return;
+            closeGalleryPreview();
+            try { showToast('正在保存图片...', 'info'); await saveGeneratedImage({ src }); }
+            catch (error) { showToast('图片保存失败: ' + (error.message || error), 'error'); }
+        };
+        const galleryCharacters = computed(() => {
+            const map = new Map();
+            imageGallery.value.forEach(item => { const key = String(item.charName || '未知角色'); if (!map.has(key)) map.set(key, { charName: key, count: 0 }); map.get(key).count++; });
+            return [...map.values()].sort((a, b) => b.count - a.count);
+        });
+        const galleryAlbums = computed(() => {
+            const map = new Map();
+            imageGallery.value.forEach(item => { const key = String(item.charName || '未知角色'); if (!map.has(key)) map.set(key, []); map.get(key).push(item); });
+            return [...map.entries()].map(([charName, items]) => ({ charName, count: items.length, previews: items.slice(0, 4) })).sort((a, b) => b.count - a.count);
+        });
+        const openAlbum = (charName) => { if (albumSelectionMode.value) return; galleryFilterChar.value = charName; };
+        const filteredGallery = computed(() => {
+            const list = [...imageGallery.value];
+            if (galleryFilterChar.value !== 'all') return list.filter(item => item.charName === galleryFilterChar.value);
+            return list;
+        });
+        const galleryDateSections = computed(() => {
+            const now = Date.now(); const DAY = 24 * 3600 * 1000; const sections = [];
+            const groups = { today: [], week: [], earlier: [] };
+            filteredGallery.value.forEach(item => { const created = Number(item.createdAt) || now; if (now - created < DAY) groups.today.push(item); else if (now - created < 7 * DAY) groups.week.push(item); else groups.earlier.push(item); });
+            if (groups.today.length) sections.push({ label: '今天', items: groups.today });
+            if (groups.week.length) sections.push({ label: '本周', items: groups.week });
+            if (groups.earlier.length) sections.push({ label: '更早', items: groups.earlier });
+            return sections;
+        });
+        // ---- 图库多选 / 相册 / 长按 ----
+        const albumSelectionMode = ref(false);
+        const albumSelected = ref(new Set());
+        const gallerySelectionMode = ref(false);
+        const gallerySelected = ref(new Set());
+        let _longPressTimer = null;
+        let _longPressCallback = null;
+        let _longPressJustFired = false;
+        let _longPressFiredAt = 0;
+        const startLongPress = (callback) => {
+            cancelLongPress();
+            _longPressCallback = callback;
+            _longPressTimer = setTimeout(() => {
+                _longPressTimer = null;
+                if (_longPressCallback) { const cb = _longPressCallback; _longPressCallback = null; _longPressJustFired = true; _longPressFiredAt = Date.now(); cb(); }
+            }, 500);
+        };
+        const cancelLongPress = () => { if (_longPressTimer) { clearTimeout(_longPressTimer); _longPressTimer = null; } _longPressCallback = null; };
+        const isRecentLongPress = () => {
+            if (_longPressJustFired) { if (Date.now() - _longPressFiredAt < 2000) { _longPressJustFired = false; return true; } _longPressJustFired = false; }
+            return false;
+        };
+        const selectAllGalleryItems = () => { gallerySelected.value = new Set(visibleGalleryItems.value.map(item => item.id)); };
+        const exportSelectedGalleryImages = async () => {
+            const ids = gallerySelected.value;
+            if (!ids.size) return;
+            const selected = imageGallery.value.filter(item => ids.has(item.id));
+            showToast(`正在保存 ${selected.length} 张图片到手机...`, 'info');
+            let success = 0;
+            for (const item of selected) {
+                try { let src = item.src; if (item.hasCache) { const full = await getGalleryCacheData(item.id); if (full && typeof full === 'string') src = full; } await saveGeneratedImage({ src }); success++; }
+                catch (err) { console.warn('Gallery export failed:', err); }
+            }
+            cancelGallerySelection();
+            showToast(`已保存 ${success}/${selected.length} 张到手机`, success === selected.length ? 'success' : 'warning');
+        };
+        const selectAllAlbums = () => { albumSelected.value = new Set(galleryAlbums.value.map(album => album.charName)); };
+        const exportSelectedAlbums = async () => {
+            const names = albumSelected.value;
+            if (!names.size) return;
+            const selected = imageGallery.value.filter(item => names.has(item.charName));
+            showToast(`正在保存 ${selected.length} 张图片到手机...`, 'info');
+            let success = 0;
+            for (const item of selected) {
+                try { let src = item.src; if (item.hasCache) { const full = await getGalleryCacheData(item.id); if (full && typeof full === 'string') src = full; } await saveGeneratedImage({ src }); success++; }
+                catch (err) { console.warn('Gallery export failed:', err); }
+            }
+            cancelAlbumSelection();
+            showToast(`已保存 ${success}/${selected.length} 张到手机`, success === selected.length ? 'success' : 'warning');
+        };
+        const GALLERY_RENDER_PAGE = 60;
+        const galleryVisibleCount = ref(120);
+        const visibleGalleryItems = computed(() => filteredGallery.value.slice(0, galleryVisibleCount.value));
+        const handleGalleryScroll = () => {
+            const mv = document.querySelector('.management-view');
+            if (!mv) return;
+            if (mv.scrollTop + mv.clientHeight >= mv.scrollHeight - 500 && galleryVisibleCount.value < filteredGallery.value.length) galleryVisibleCount.value += GALLERY_RENDER_PAGE;
+        };
+        watch(galleryFilterChar, () => { galleryVisibleCount.value = 120; });
+        const handleAlbumClick = (album) => {
+            if (isRecentLongPress()) return;
+            if (albumSelectionMode.value) { toggleAlbumSelection(album.charName); return; }
+            openAlbum(album.charName);
+        };
+        const handleGalleryItemClick = (item) => {
+            if (isRecentLongPress()) return;
+            if (gallerySelectionMode.value) toggleGallerySelection(item.id);
+            else openGalleryPreview(item);
+        };
+        const onAlbumLongPress = (album) => { albumSelectionMode.value = true; albumSelected.value = new Set(albumSelected.value.has(album.charName) ? albumSelected.value : [...albumSelected.value, album.charName]); };
+        const toggleAlbumSelection = (charName) => { const next = new Set(albumSelected.value); if (next.has(charName)) next.delete(charName); else next.add(charName); albumSelected.value = next; };
+        const cancelAlbumSelection = () => { albumSelectionMode.value = false; albumSelected.value = new Set(); _longPressJustFired = false; };
+        const stopGalleryCachingForDeleted = (ids) => {
+            _galleryCacheQueue = _galleryCacheQueue.filter(item => !ids.has(item.id));
+            _cacheBatch = _cacheBatch.filter(entry => !ids.has(entry.id));
+            ids.forEach(id => deleteGalleryCacheData(id));
+        };
+        const deleteSelectedAlbums = () => {
+            const names = albumSelected.value;
+            if (!names.size) return;
+            const count = imageGallery.value.filter(item => names.has(item.charName)).length;
+            confirmAction(`确定删除选中的 ${names.size} 个相册、共 ${count} 张图片吗？此操作无法撤销。`, () => {
+                const removed = imageGallery.value.filter(item => names.has(item.charName));
+                const removedSrcs = removed.map(item => item.src);
+                imageGallery.value = imageGallery.value.filter(item => !names.has(item.charName));
+                stopGalleryCachingForDeleted(new Set(removed.map(item => item.id)));
+                markGallerySrcDeleted(removedSrcs);
+                cancelAlbumSelection(); saveImageGallery(); refreshGalleryCacheStats();
+                showToast('已删除', 'success');
+            });
+        };
+        const onGalleryItemLongPress = (item) => { gallerySelectionMode.value = true; gallerySelected.value = new Set(gallerySelected.value.has(item.id) ? gallerySelected.value : [...gallerySelected.value, item.id]); };
+        const toggleGallerySelection = (id) => { const next = new Set(gallerySelected.value); if (next.has(id)) next.delete(id); else next.add(id); gallerySelected.value = next; };
+        const cancelGallerySelection = () => { gallerySelectionMode.value = false; gallerySelected.value = new Set(); _longPressJustFired = false; };
+        const deleteSelectedGalleryImages = () => {
+            const ids = gallerySelected.value;
+            if (!ids.size) return;
+            confirmAction(`确定删除选中的 ${ids.size} 张图片吗？此操作无法撤销。`, () => {
+                const removedSrcs = imageGallery.value.filter(item => ids.has(item.id)).map(item => item.src);
+                imageGallery.value = imageGallery.value.filter(item => !ids.has(item.id));
+                stopGalleryCachingForDeleted(ids);
+                markGallerySrcDeleted(removedSrcs);
+                cancelGallerySelection(); saveImageGallery(); refreshGalleryCacheStats();
+                showToast('已删除', 'success');
+            });
         };
 
         const saveData = async (options = {}) => {
@@ -2074,6 +2617,40 @@ const app = createApp({
             return payload;
         };
 
+        // ==== 锁图机制 (迁移)：生成完成即固化到消息，切换画风/模型不再重刷、不再重复扣点 ====
+        const lockGeneratedImageToMessage = (card, imageUrl, requestUrl) => {
+            if (!card || !imageUrl) return;
+            const msgContainer = card.closest('[data-message-index]');
+            if (!msgContainer) return;
+            const msgIdx = parseInt(msgContainer.dataset.messageIndex, 10);
+            if (isNaN(msgIdx) || msgIdx < 0 || msgIdx >= chatHistory.value.length) return;
+            const message = chatHistory.value[msgIdx];
+            if (!message || message.role !== 'assistant') return;
+            const allCards = [...msgContainer.querySelectorAll('.generated-image-card')];
+            const cardIndex = allCards.indexOf(card);
+            if (cardIndex < 0) return;
+            if (!Array.isArray(message.lockedImages)) message.lockedImages = [];
+            message.lockedImages[cardIndex] = {
+                url: imageUrl,
+                requestUrl: requestUrl || '',
+                lockedAt: Date.now()
+            };
+            card.dataset.imageLocked = 'true';
+            scheduleChatHistorySave();
+        };
+        const getLockedImageForCard = (card, options = {}) => {
+            if (!card || options.fresh) return null;
+            const msgContainer = card.closest('[data-message-index]');
+            if (!msgContainer) return null;
+            const msgIdx = parseInt(msgContainer.dataset.messageIndex, 10);
+            const message = !isNaN(msgIdx) ? chatHistory.value[msgIdx] : null;
+            if (!message || !Array.isArray(message.lockedImages)) return null;
+            const allCards = [...msgContainer.querySelectorAll('.generated-image-card')];
+            const cardIndex = allCards.indexOf(card);
+            const locked = cardIndex >= 0 ? message.lockedImages[cardIndex] : null;
+            return locked && locked.url ? locked : null;
+        };
+
         const renderGeneratedImageJob = (card, task, job) => {
             if (!card?.isConnected) return task.cards.delete(card);
             task.job = job;
@@ -2112,6 +2689,10 @@ const app = createApp({
             image.src = imageUrl;
             card.classList.remove('is-generating', 'is-generation-error', 'is-waiting');
             card.dataset.imageJobState = job.status;
+            if (job.status === 'done' && imageUrl) {
+                try { lockGeneratedImageToMessage(card, imageUrl, task.requestUrl || card.dataset.imageRequest); }
+                catch (e) { console.warn('lock image failed', e); }
+            }
         };
 
         const startGeneratedImageTask = (requestUrl, fresh = false) => {
@@ -2173,6 +2754,17 @@ const app = createApp({
         const loadGeneratedImageCard = (card, requestUrl = card?.dataset.imageRequest, options = {}) => {
             if (!card || !requestUrl) return Promise.resolve({ status: 'failed' });
             ensureGeneratedImageProgressUi(card);
+            const lockedImage = getLockedImageForCard(card, options);
+            if (lockedImage) {
+                const image = card.querySelector('img');
+                if (image) { image.style.height = '100%'; image.src = lockedImage.url; }
+                card.classList.remove('is-generating', 'is-generation-error', 'is-waiting');
+                card.dataset.imageJobState = 'done';
+                card.dataset.imageLocked = 'true';
+                const lockedSize = new URL(requestUrl, window.location.href).searchParams.get('size');
+                card.style.aspectRatio = lockedSize === '横图' ? '1216 / 832' : lockedSize === '方图' ? '1' : '832 / 1216';
+                return Promise.resolve({ status: 'done', imageUrl: lockedImage.url });
+            }
             generatedImageTasks.forEach(task => task.cards.delete(card));
             card.querySelector('img')?.setAttribute('alt', '');
             const animationTime = performance.now();
@@ -3976,6 +4568,28 @@ const app = createApp({
             }
         };
 
+        // ==== 消息级 UI 模板重新生成 (迁移) ====
+        const regenerateMessageUiTemplate = async (index) => {
+            const message = chatHistory.value[index];
+            if (!message || message.role !== 'assistant') return;
+            if (isConversationBusy.value) {
+                showToast('请等待当前生成完成后再试', 'warning');
+                return;
+            }
+            if (!settings.uiTemplateEnabled || !activeUiTemplates.value.length) {
+                showToast('请先开启 UI 模板功能并启用至少一个模板', 'info');
+                return;
+            }
+            if (!message.id) message.id = generateUUID();
+            delete message.uiTemplateBlocks;
+            try {
+                await updateUiTemplatesFromChat({ manual: true, targetMessageId: message.id });
+            } catch (err) {
+                console.error('Regenerate UI template failed:', err);
+                showToast('重新生成 UI 模板失败: ' + (err.message || err), 'error');
+            }
+        };
+
         const updateUiTemplatesFromChat = async ({ manual = false, targetMessageId = null } = {}) => {
             if (!settings.uiTemplateEnabled) {
                 markUiTemplateStatus('skipped', '未开启');
@@ -4286,6 +4900,48 @@ const app = createApp({
             const previousCount = classicMemories.value.length;
             classicMemories.value = trimClassicMemoriesToTurn(classicMemories.value, firstRemovedTurn - 1);
             return Math.max(0, previousCount - classicMemories.value.length);
+        };
+
+        // ==== 消息批量多选删除 (迁移) ====
+        const isBatchMessageDeleteMode = ref(false);
+        const selectedMessageIndices = ref(new Set());
+        const startBatchDeleteFromMessage = (index) => {
+            isBatchMessageDeleteMode.value = true;
+            selectedMessageIndices.value = new Set([index]);
+        };
+        const cancelBatchMessageDelete = () => {
+            isBatchMessageDeleteMode.value = false;
+            selectedMessageIndices.value = new Set();
+        };
+        const toggleMessageSelection = (index) => {
+            const next = new Set(selectedMessageIndices.value);
+            if (next.has(index)) next.delete(index); else next.add(index);
+            selectedMessageIndices.value = next;
+        };
+        const selectAllMessages = () => {
+            if (selectedMessageIndices.value.size === chatHistory.value.length) {
+                selectedMessageIndices.value = new Set();
+            } else {
+                selectedMessageIndices.value = new Set(chatHistory.value.map((_, i) => i));
+            }
+        };
+        const confirmBatchDeleteMessages = () => {
+            const indexes = [...selectedMessageIndices.value].filter(i => Number.isInteger(i) && chatHistory.value[i]);
+            const count = indexes.length;
+            if (!count) { showToast('请先选择要删除的消息', 'info'); return; }
+            confirmAction('确定要删除选中的 ' + count + ' 条消息吗？此操作无法撤销。', async () => {
+                try {
+                    abortConversationBackgroundWork();
+                    const toDelete = new Set(indexes);
+                    chatHistory.value = chatHistory.value.filter((_, i) => !toDelete.has(i));
+                    cancelBatchMessageDelete();
+                    scheduleChatHistorySave();
+                    showToast('已删除 ' + count + ' 条消息', 'success');
+                } catch (err) {
+                    console.error('Batch delete failed:', err);
+                    showToast('批量删除失败: ' + (err.message || err), 'error');
+                }
+            });
         };
 
         const deleteMessage = (index) => {
@@ -7236,44 +7892,60 @@ const app = createApp({
         };
 
         const readJsonFileInput = (event, handleData, handleError) => {
-            const input = event.target;
-            const file = input.files?.[0];
+            const input = event?.target;
+            const file = input?.files?.[0];
             if (!file) return;
             const reader = new FileReader();
             reader.onload = async ({ target }) => {
                 try {
-                    await handleData(JSON.parse(target.result));
+                    await handleData(JSON.parse(target?.result));
                 } catch (error) {
-                    handleError(error);
+                    if (handleError) handleError(error);
+                    else console.error('JSON file parse error:', error);
                 } finally {
-                    input.value = '';
+                    try { if (input) input.value = ''; } catch (_) { }
                 }
             };
             reader.onerror = () => {
-                handleError(reader.error || new Error('读取文件失败'));
-                input.value = '';
+                const err = reader.error || new Error('读取文件失败');
+                if (handleError) handleError(err);
+                try { if (input) input.value = ''; } catch (_) { }
             };
             reader.readAsText(file);
         };
 
-        const importUiTemplates = (event) => readJsonFileInput(event, data => {
-            const templates = Array.isArray(data) ? data : (Array.isArray(data.templates) ? data.templates : []);
-            if (!templates.length) throw new Error('未找到模板数组');
-            const normalized = templates.map(t => {
-                const cleanTemplate = sanitizeUiTemplateImportEntry(t);
-                return normalizeUiTemplate({ ...cleanTemplate, id: generateUUID(), enabled: cleanTemplate.enabled === true ? true : false });
-            });
-            const globalTemplates = normalized.filter(template => template.scope === 'global');
-            const characterTemplates = normalized.filter(template => template.scope !== 'global');
-            if (characterTemplates.length && !currentCharacter.value) {
-                showToast('绑定角色卡的模板需要先选择角色卡', 'warning');
-                return;
+        const importUiTemplates = (event) => readJsonFileInput(event, async (data) => {
+            try {
+                let templates = [];
+                if (Array.isArray(data)) {
+                    templates = data;
+                } else if (data && Array.isArray(data.templates)) {
+                    templates = data.templates;
+                } else if (data && typeof data === 'object' && (data.htmlTemplate || data.template || data.name || data.variables || data.variableState || data.id)) {
+                    templates = [data];
+                }
+                if (!templates.length) throw new Error('未识别到有效的UI模板数据');
+                const normalized = templates.map(t => {
+                    const cleanTemplate = sanitizeUiTemplateImportEntry(t);
+                    return normalizeUiTemplate({ ...cleanTemplate, id: generateUUID(), enabled: cleanTemplate.enabled === true ? true : false });
+                });
+                const globalTemplates = normalized.filter(template => template.scope === 'global');
+                const characterTemplates = normalized.filter(template => template.scope !== 'global');
+                if (characterTemplates.length && !currentCharacter.value) {
+                    showToast('绑定角色卡的模板需要先选择角色卡', 'warning');
+                    return;
+                }
+                ensureGlobalUiTemplates().push(...globalTemplates);
+                if (currentCharacter.value) {
+                    ensureCurrentUiTemplates().push(...characterTemplates);
+                }
+                await saveData();
+                showToast(`成功导入 ${normalized.length} 个UI模板`, 'success');
+            } catch (err) {
+                console.error('Import UI template error:', err);
+                showToast('导入失败: ' + (err.message || err), 'error');
             }
-            ensureGlobalUiTemplates().push(...globalTemplates);
-            ensureCurrentUiTemplates().push(...characterTemplates);
-            saveData();
-            showToast(`成功导入 ${normalized.length} 个UI模板`, 'success');
-        }, error => showToast(`UI模板导入失败: ${error.message}`, 'error'));
+        }, error => showToast(`UI模板导入失败: ${error.message || error}`, 'error'));
 
         const deleteCharacterData = async (char, legacyIndex, knownStorageKeys = null) => {
             if (!getMainDb()) await initDB();
@@ -7674,16 +8346,18 @@ const app = createApp({
                 branches: cloneForStorage(storyBranches.value)
             };
             saveGlobalUiTemplateRuntimeForCharacter();
-            await saveChatHistoryNow(storyScopeId, historySource);
-            await saveMemoriesNow(storyScopeId, vectorMemorySource);
-            await saveClassicMemoriesNow(storyScopeId, classicMemorySource);
+            // 关键：这些写入全部落到 IndexedDB，事务异常时可能永不落定；逐个加超时兜底，
+            // 避免旧的剧情分支状态保存把整个角色切换拖死（超时按“尽力而为”继续）。
+            await withTimeoutResult(saveChatHistoryNow(storyScopeId, historySource), SWITCH_STEP_TIMEOUT_MS, 'branch-save-chat');
+            await withTimeoutResult(saveMemoriesNow(storyScopeId, vectorMemorySource), SWITCH_STEP_TIMEOUT_MS, 'branch-save-memories');
+            await withTimeoutResult(saveClassicMemoriesNow(storyScopeId, classicMemorySource), SWITCH_STEP_TIMEOUT_MS, 'branch-save-classic');
             if (!isCurrentRequest()) return false;
-            await Promise.all([
+            await withTimeoutResult(Promise.all([
                 saveStoryBranchesForCharacter(char, branchState),
                 saveMemorySettingsNow(),
                 setStoredValue('global_ui_templates', globalUiTemplates.value),
                 saveCharactersNow()
-            ]);
+            ]), SWITCH_STEP_TIMEOUT_MS, 'branch-save-batch');
             return true;
         };
 
@@ -8056,28 +8730,36 @@ const app = createApp({
             const switchEpoch = ++_characterSwitchEpoch;
             const isLatestSwitch = () => switchEpoch === _characterSwitchEpoch;
             switchingCharacterIndex.value = index;
+            // 关键：每次切换都显式武装整体超时护栏（不依赖 ref 值变化，赋相同值也能重新武装）。
+            armSwitchWatchdog(switchEpoch);
             try {
-            await _characterSwitchSavePromise;
+            await withTimeoutResult(_characterSwitchSavePromise, SWITCH_STEP_TIMEOUT_MS, 'previous-switch-save');
             if (!isLatestSwitch()) return;
 
             if (isConversationBusy.value) {
                 stopGeneration();
-                const stopped = await waitForConversationIdle();
+                const idleResult = await withTimeoutResult(waitForConversationIdle(), 5000, 'wait-conversation-idle');
                 if (!isLatestSwitch()) return;
-                await saveChatHistoryNow(getCurrentStoryBranchScopeId(), chatHistory.value);
+                await withTimeoutResult(saveChatHistoryNow(getCurrentStoryBranchScopeId(), chatHistory.value), SWITCH_STEP_TIMEOUT_MS, 'stop-save-chat');
                 if (!isLatestSwitch()) return;
+                const stopped = idleResult.ok ? idleResult.value : false;
                 if (!stopped) {
                     showToast('正在停止生成，请稍后再切换角色卡', 'warning');
                     return;
                 }
             }
-            await flushPendingChatHistorySave();
+            // 关键：flush 内部即便队列被污染也不会永久挂起（见 flushPendingChatHistorySave 的超时）。
+            await withTimeoutResult(flushPendingChatHistorySave(), SWITCH_STEP_TIMEOUT_MS, 'flush-pending-chat-save');
             if (!isLatestSwitch()) return;
             abortUiTemplateUpdate();
             const previousCharacterIndex = currentCharacterIndex.value;
             abortVectorBatchExtraction();
             abortClassicBatchExtraction();
-            if (previousCharacterIndex !== -1 && !await saveCurrentStoryBranchState(switchEpoch)) return;
+            if (previousCharacterIndex !== -1) {
+                const branchSave = await withTimeoutResult(saveCurrentStoryBranchState(switchEpoch), SWITCH_STEP_TIMEOUT_MS, 'save-current-branch');
+                // 超时（!ok）按“继续”处理，避免旧角色的保存卡死把整个切换拖死。
+                if (branchSave.ok && branchSave.value === false) return;
+            }
             if (!isLatestSwitch()) return;
             clearVectorMemorySearch();
 
@@ -8087,16 +8769,22 @@ const app = createApp({
             try {
                 if (!char.uuid) {
                     char.uuid = generateUUID();
-                    await saveCharactersNow();
+                    await withTimeoutResult(saveCharactersNow(), SWITCH_STEP_TIMEOUT_MS, 'save-new-uuid');
                     if (!isLatestSwitch()) return;
                 }
-                branchState = await readStoryBranchesForCharacter(char);
+                // 关键：分支与聊天记录的读取结果决定后续状态，必须拿到；超时则抛错走 catch 优雅退出，
+                // 而不是永久挂起（否则 finally 永不执行、界面卡死在“正在切换”）。
+                const branchRead = await withTimeoutResult(readStoryBranchesForCharacter(char), SWITCH_STEP_TIMEOUT_MS, 'read-story-branches');
+                if (!branchRead.ok) throw (branchRead.error || new Error('读取剧情分支超时'));
+                branchState = branchRead.value;
                 if (!isLatestSwitch()) return;
                 const storyScopeId = getStoryBranchScopeId(char.uuid, branchState.activeBranchId);
-                [loadedChatHistory, loadedMemories] = await Promise.all([
+                const historyRead = await withTimeoutResult(Promise.all([
                     loadStoredChatHistory(char, index, storyScopeId),
                     readCharacterMemories(storyScopeId)
-                ]);
+                ]), SWITCH_STEP_TIMEOUT_MS, 'read-chat-and-memories');
+                if (!historyRead.ok) throw (historyRead.error || new Error('读取聊天记录超时'));
+                [loadedChatHistory, loadedMemories] = historyRead.value;
                 if (!isLatestSwitch()) return;
             } catch (error) {
                 if (!isLatestSwitch()) return;
@@ -8152,11 +8840,16 @@ const app = createApp({
                 if (isNewImport) showAutoImageGenModal.value = true;
             }
 
-            _characterSwitchSavePromise = setStoredValue('last_active_char', index);
+            // 关键：把结果存成“必定落定”的 promise（永不 pending/reject），
+            // 避免一个卡死的保存污染后续所有切换入口的 await（H3）。
+            _characterSwitchSavePromise = withTimeoutResult(
+                setStoredValue('last_active_char', index), SWITCH_STEP_TIMEOUT_MS, 'save-last-active-char'
+            ).then(() => undefined, () => undefined);
             await _characterSwitchSavePromise;
             return isLatestSwitch();
             } finally {
-                if (isLatestSwitch()) switchingCharacterIndex.value = -1;
+                disarmSwitchWatchdog(switchEpoch);
+                if (isLatestSwitch() || switchingCharacterIndex.value === index) switchingCharacterIndex.value = -1;
             }
         };
 
@@ -8437,12 +9130,35 @@ const app = createApp({
             try {
                 const v2Data = buildCharacterExportData(char);
                 const blob = new Blob([JSON.stringify(v2Data, null, 2)], { type: 'application/json' });
-                cardUtils.downloadBlob(blob, (char.name || 'character') + '.json');
+                cardUtils.downloadBlob(blob, (char.name || 'character') + '.json', { subDir: 'Characters' });
                 showToast('角色卡 JSON 导出成功', 'success');
             } catch (e) {
                 console.error('JSON export error:', e);
                 showToast('JSON 导出失败: ' + e.message, 'error');
             }
+        };
+
+        // ==== 对话导出紧凑化：剥离内联 Base64 图片，仅保留文本与描述 ====
+        const compactChatExportMessage = (message) => {
+            if (!message || typeof message !== 'object' || Array.isArray(message)) return message;
+            const compact = {
+                role: message.role || 'user',
+                content: String(message.content || '')
+            };
+            ['id', 'name', 'reasoning', 'isSelf', 'isTriggered'].forEach(key => {
+                if (message[key] !== undefined && message[key] !== null) compact[key] = message[key];
+            });
+            if (Array.isArray(message.toolCalls) && message.toolCalls.length) {
+                compact.toolCalls = message.toolCalls;
+            }
+            if (message.uiTemplateBlocks) compact.uiTemplateBlocks = message.uiTemplateBlocks;
+            if (Array.isArray(message.imageAttachments) && message.imageAttachments.length) {
+                compact.imageAttachmentDescriptions = message.imageAttachments.map(item => ({
+                    description: String(item?.description || ''),
+                    name: String(item?.name || '')
+                }));
+            }
+            return compact;
         };
 
         const exportCharacterChat = async (index) => {
@@ -8502,9 +9218,13 @@ const app = createApp({
                         : STORY_BRANCH_MAIN_ID,
                     branches: branchMetadata
                 };
-                const chatLines = [manifest, ...branchChats].map(record => JSON.stringify(record)).join('\n');
+                const compactBranchChats = branchChats.map(branch => ({
+                    branchId: branch.branchId,
+                    messages: (branch.messages || []).map(compactChatExportMessage)
+                }));
+                const chatLines = [manifest, ...compactBranchChats].map(record => JSON.stringify(record)).join('\n');
                 const chatBlob = new Blob([chatLines], { type: 'application/x-ndjson;charset=utf-8' });
-                cardUtils.downloadBlob(chatBlob, (char.name || 'character') + '_全部分支_chat.jsonl');
+                await cardUtils.downloadBlob(chatBlob, (char.name || 'character') + '_全部分支_chat.jsonl', { subDir: 'Chats' });
                 showToast(`已导出 ${branches.length} 个分支，共 ${totalMessages} 条聊天记录`, 'success');
             } catch (chatExpError) {
                 console.error('Chat export error:', chatExpError);
@@ -8524,7 +9244,7 @@ const app = createApp({
                     'chara',
                     cardUtils.encodeBase64Utf8(JSON.stringify(v2Data))
                 );
-                cardUtils.downloadBlob(new Blob([finalPng], { type: 'image/png' }), (char.name || 'character') + '.png');
+                cardUtils.downloadBlob(new Blob([finalPng], { type: 'image/png' }), (char.name || 'character') + '.png', { subDir: 'Characters' });
                 showToast('角色卡 PNG 导出成功', 'success');
             } catch (e) {
                 console.error('PNG export error:', e);
@@ -8579,6 +9299,9 @@ const app = createApp({
 
         // Lifecycle
         onMounted(async () => {
+            try { await loadImageGallery(); } catch (e) { console.warn('loadImageGallery failed', e); }
+            try { await loadGalleryMeta(); } catch (e) { }
+            try { if (settings.exportPath) await applyExportPath(settings.exportPath, { silent: true }); } catch (e) { }
             document.addEventListener('fullscreenchange', syncChatFullscreenState);
             document.addEventListener('webkitfullscreenchange', syncChatFullscreenState);
 
@@ -9038,6 +9761,22 @@ const app = createApp({
         };
 
         return {
+            isNativeApp,
+            applyExportPath, resetExportPath,
+            imageGallery, galleryFilterChar, galleryPreviewSrc, showGalleryPreview, galleryCacheStats,
+            getGalleryItemDisplaySrc, openGallery, openGalleryPreview, closeGalleryPreview, confirmGalleryImageSave,
+            galleryCharacters, galleryAlbums, openAlbum, filteredGallery, galleryDateSections, visibleGalleryItems, handleGalleryScroll,
+            albumSelectionMode, albumSelected, gallerySelectionMode, gallerySelected,
+            startLongPress, cancelLongPress, isRecentLongPress, handleAlbumClick, handleGalleryItemClick,
+            onGalleryItemLongPress, toggleGallerySelection, cancelGallerySelection, deleteSelectedGalleryImages,
+            selectAllGalleryItems, exportSelectedGalleryImages, selectAllAlbums, exportSelectedAlbums, addImageToGallery,
+            cancelAlbumSelection, deleteSelectedAlbums, toggleAlbumSelection,
+            showGeneratedImagePreview, generatedImagePreviewSrc, handleGeneratedImagePreviewClick,
+            openGeneratedImagePreview, closeGeneratedImagePreview, confirmGeneratedImageSave, saveGeneratedImagePreviewToGallery,
+            saveToGallery, saveGeneratedImage,
+            isBatchMessageDeleteMode, selectedMessageIndices, startBatchDeleteFromMessage,
+            cancelBatchMessageDelete, toggleMessageSelection, selectAllMessages, confirmBatchDeleteMessages,
+            regenerateMessageUiTemplate,
             switchProfile, createNewProfile, deleteProfile, userProfiles, activeProfileId, showProfileDropdown,
             processMainContent, replaceUserNamePlaceholder,
             currentView, showDescriptionPanel, showModelSelector, modelSelectionTarget, openModelSelector, showChatModelSelector, showCharacterEditor, showAddCharacterMenu, showPresetEditor, showUiTemplateEditor,
