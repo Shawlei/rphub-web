@@ -48,6 +48,37 @@
 3. `git add -A && git commit -m "..." && git push`。
 4. Cloudflare Pages 检测到推送后自动重新构建发布，几十秒后生效。
 
+## 与上游同步（fork 工作流）
+
+本仓库的提交历史挂在上游之下，血缘正确：
+
+```
+* <你的定制提交>
+* d312bd4 (tag: 1.9.4, upstream/main) Add files via upload
+* ...
+```
+
+所以上游发新版时**不需要重做定制**，一条命令即可三方合并：
+
+```bash
+git fetch upstream
+git merge -X ignore-cr-at-eol upstream/main
+```
+
+> ⚠️ **`-X ignore-cr-at-eol` 不能省。** 上游发布的文件用的是 CRLF，本仓库是 LF；
+> 不加这个参数，git 会认为我们改动了每一行，连**我们根本没碰过**的文件（如
+> `assets/js/data-services.js`）都会报冲突。已实测：不加参数 → `CONFLICT`；
+> 加上 → 干净合并。
+>
+> 合并后只有真正被定制过的文件（`index.html`、`app.js`、`core-utils.js`、
+> `ui-components.js`、`styles.css`）可能冲突，逐块取舍即可 ——
+> 每个改动块的含义见 `docs/定制改动施工清单.md`（C1～C11）。
+
+上游远程已在本地配好：
+```bash
+git remote -v     # upstream -> https://github.com/STA1N156/RP-Hub.git
+```
+
 ## 使用说明
 
 1. 打开网站（`https://<项目名>.pages.dev`）。
