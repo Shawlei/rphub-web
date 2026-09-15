@@ -1,6 +1,6 @@
 // RP-Hub 定制网页版 Service Worker
 // 注意：每次发版请递增下面的 CACHE_NAME 版本号，以刷新客户端缓存。
-const CACHE_NAME = 'rphub-web-v5';
+const CACHE_NAME = 'rphub-web-v6';
 const STATIC_ASSETS = [
     './',
     './index.html',
