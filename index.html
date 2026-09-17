@@ -562,7 +562,7 @@
                                                                                 :class="{ 'timeline-thinking-detail': step.type === 'thinking' }">
                                                                                 <div v-if="step.type === 'thinking'" class="markdown-body"
                                                                                     :style="settings.fontSize ? { fontSize: (settings.fontSize - 1.5) + 'px' } : {}"
-                                                                                    v-html="renderMarkdown(step.text, 'assistant', true)">
+                                                                                    v-html="renderMarkdown(step.text, 'assistant', true, false)">
                                                                                 </div>
                                                                                 <div v-else class="tool-call-detail flex flex-col gap-3 text-[13px]">
                                                                                     <div class="flex justify-between items-center text-[13px] border-b border-gray-200 pb-2">
@@ -2702,7 +2702,7 @@
                         </div>
                         <div v-if="displayedClassicMemories.length === 0"
                             class="py-8 text-center text-sm text-gray-400">
-                            还没有基础模式记忆，可继续对话或点击补录记忆
+                            当前没有记忆，可继续对话或点击补录记忆
                         </div>
                         <div v-else class="space-y-4">
                             <article v-for="memory in displayedClassicMemories" :key="memory.id"

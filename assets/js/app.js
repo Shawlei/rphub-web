@@ -5004,7 +5004,7 @@ const app = createApp({
                     nonce = Math.random().toString(36).slice(2, 8 + Math.floor(Math.random() * 3));
                 } while (!/^(?=.*[a-z])(?=.*\d)[a-z\d]{6,8}$/.test(nonce) || usedGeminiPromptNonces.has(nonce));
                 usedGeminiPromptNonces.add(nonce);
-                noncePreset.content = noncePreset.content.replace(/(\s*<\/[\w:-]+>\s*)?$/, `\n${nonce}$1`);
+                noncePreset.content = `${nonce}\n${noncePreset.content}`;
             }
             const writingStylePresets = enabledPresets.filter(p => p.name === BUILTIN_PRESETS.writingStyle.name);
             const cotPresets = enabledPresets.filter(p => p.name === 'COT');
@@ -6638,7 +6638,7 @@ const app = createApp({
             }
 
             // 3. 分析过程 (CoT)
-            const cotText = String(cotInfo.cot || '').trim();
+            const cotText = String(cotInfo.rawCot || '').trim();
             if (cotText) {
                 steps.push({
                     id: 'cot-reasoning',
