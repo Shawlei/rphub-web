@@ -1910,7 +1910,7 @@
                                                 class="settings-label">自动生图密钥</label>
                                             <input v-model="settings.imageGenKey" type="password"
                                                 class="settings-control font-mono"
-                                                placeholder="STA1N-...">
+                                                placeholder="STA1N密钥/NAI官方密钥">
                                         </div>
 
                                         <!-- Image Model -->
@@ -2844,7 +2844,7 @@
             @close="showMemoryBackfillModal = false" @stop="abortBatchExtraction"
             @retry="startBatchMemoryExtraction"></memory-backfill-modal>
 
-        <update-notification-modal ref="updateModalRef" :update="latestUpdateConfig"
+        <update-notification-modal ref="updateModalRef" :update="latestUpdateDisplay"
             :render-markdown="renderMarkdown"></update-notification-modal>
 
         <user-setup-modal :show="showUserSetupModal" :name="tempUserSetup.name"

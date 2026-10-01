@@ -132,6 +132,19 @@ const {
     uiOptions
 } = window.RPHubConfig;
 
+// ==== C12（2026-10-02，用户要求）：更新公告只显示更新内容 ====
+// 上游公告尾部会带 QQ 交流群号（RPH交流群①…⑤ 等），在展示层按行过滤掉，
+// 上游以后改公告也不用再动这里。
+const stripAnnouncementQqBlock = (content) => String(content || '')
+    .split('\n')
+    .filter(line => !/交流群|群号|欢迎进群|群友管理/.test(line))
+    .join('\n');
+const latestUpdateDisplay = latestUpdateConfig
+    ? Object.assign({}, latestUpdateConfig, {
+        content: stripAnnouncementQqBlock(latestUpdateConfig.content)
+    })
+    : latestUpdateConfig;
+
 // Configure marked to disable indented code blocks
 // This allows indented HTML (like details/summary) to be rendered as HTML instead of code
 marked.use({
@@ -841,7 +854,7 @@ const app = createApp({
             }
 
             syncSettingsToGenerator();
-        }, { deep: true });
+        });
 
         // Watch image gen and model settings for sync
         watch(() => [settings.imageGenKey, settings.imageModel, settings.imageStyle, settings.customImageArtists, settings.imageGenCount, settings.qualityModel, settings.balancedModel, settings.fastModel, settings.uiTemplateModel, settings.fontFamily, settings.fontFamilyVersion], () => {
@@ -1397,7 +1410,6 @@ const app = createApp({
             getTokenUsageTypeLabel,
             getUncachedInputTokens,
             recordApiUsage,
-            saveTokenUsageHistoryNow,
             showTokenUsageTimeFilter,
             tokenUsageFilter,
             tokenUsageHistory,
@@ -3620,11 +3632,15 @@ const app = createApp({
                 : 0;
         });
 
+        const selectableModels = computed(() => ['quickModels', 'memoryClassicModel'].includes(modelSelectionTarget.value)
+            ? availableModels.value.filter(model => !/embedding/i.test(model.id))
+            : availableModels.value);
+
         const modelTags = computed(() => {
-            const counts = { all: availableModels.value.length, other: 0 };
+            const counts = { all: selectableModels.value.length, other: 0 };
             const tags = new Set();
 
-            availableModels.value.forEach(m => {
+            selectableModels.value.forEach(m => {
                 const id = m.id.toLowerCase();
                 let found = false;
                 for (const family of popularModelFamilies) {
@@ -3646,7 +3662,7 @@ const app = createApp({
         });
 
         const filteredModels = computed(() => {
-            let result = availableModels.value;
+            let result = selectableModels.value;
 
             if (activeModelTag.value && activeModelTag.value !== 'all') {
                 if (activeModelTag.value === 'other') {
@@ -3665,7 +3681,7 @@ const app = createApp({
                 result = result.filter(m => m.id.toLowerCase().includes(query));
             }
 
-            return result.sort((a, b) => a.id.localeCompare(b.id));
+            return [...result].sort((a, b) => a.id.localeCompare(b.id));
         });
 
         const getCharacterWICount = (char) => {
@@ -4505,10 +4521,6 @@ const app = createApp({
                 const failedTemplateIds = new Set();
                 const pendingTemplateUpdates = [];
 
-                const normalizeUiTemplateUpdates = (parsed, template) => {
-                    return normalizeUiTemplateUpdateList(parsed, [template]);
-                };
-
                 const applyTemplateUpdates = (template, updates, model) => {
                     updates.forEach(update => {
                         const result = applyUiTemplateUpdateListToTemplate(template, [update], { model, turn });
@@ -4525,7 +4537,7 @@ const app = createApp({
                         const currentVariableJson = JSON.stringify(template.variableState || {}, null, 2);
                         const variableSchemaText = stringifyUiSchema(template.variableSchema).trim();
                         const result = await requestTrackedChatCompletion({
-                            model, temperature: 0.2, stream: false,
+                            model, temperature: 0.4, stream: false,
                             messages: [
                                 {
                                     role: 'system',
@@ -4554,7 +4566,7 @@ const app = createApp({
                         console.info('[UI模板][副模型] 最新一次变量输出：', latestUiTemplateAnalysis);
                         const updateBlock = findUiTemplateUpdateBlock(content);
                         const parsed = parseUiTemplateUpdates(updateBlock ? updateBlock[1] : content, [template]);
-                        const updates = normalizeUiTemplateUpdates(parsed, template);
+                        const updates = normalizeUiTemplateUpdateList(parsed, [template]);
                         pendingTemplateUpdates.push({ template, updates, model });
                     } catch (e) {
                         if (updateRun.signal.aborted || !isCurrentRun()) return;
@@ -4873,9 +4885,9 @@ const app = createApp({
                     properties: {
                         min: { type: 'integer', minimum: Number.MIN_SAFE_INTEGER, maximum: Number.MAX_SAFE_INTEGER, description: '随机整数的下限，包含该值。' },
                         max: { type: 'integer', minimum: Number.MIN_SAFE_INTEGER, maximum: Number.MAX_SAFE_INTEGER, description: '随机整数的上限，包含该值，不小于 min。' },
+                        choices: { type: 'array', items: { type: 'string', minLength: 1 }, minItems: 1, description: '自定义候选名称，从中等概率抽取一项；与 min、max 二选一，不可同时传入。' },
                         reason: { type: 'string', description: '可选，一句话说明随机判定的用途。' }
                     },
-                    required: ['min', 'max'],
                     additionalProperties: false
                 } : {
                     type: 'object',
@@ -6373,8 +6385,8 @@ const app = createApp({
             return size;
         };
 
-        const generateRandomNumberForTool = (min, max) => {
-            const size = getRandomToolRangeSize(min, max);
+        const generateRandomResultForTool = ({ min, max, choices }) => {
+            const size = choices ? choices.length : getRandomToolRangeSize(min, max);
             // 丢弃不能均分到范围内的尾部，避免取余后某些数字更容易出现。
             const sampleSpace = 2 ** 53;
             const limit = sampleSpace - (sampleSpace % size);
@@ -6384,7 +6396,9 @@ const app = createApp({
                 crypto.getRandomValues(words);
                 sample = (words[0] & 0x1fffff) * 2 ** 32 + words[1];
             } while (sample >= limit);
-            return { min, max, value: min + sample % size };
+            return choices
+                ? { choices, value: choices[sample % size] }
+                : { min, max, value: min + sample % size };
         };
 
         const parseNativeActiveToolCall = (call, tools) => {
@@ -6398,11 +6412,24 @@ const app = createApp({
                     throw new Error('工具参数必须为 JSON 对象，reason 为可选字符串');
                 }
                 if (tool.type === ACTIVE_TOOL_RANDOM_TYPE) {
-                    if (Object.keys(args).some(key => !['min', 'max', 'reason'].includes(key))) {
-                        throw new Error('随机数工具仅接受 min、max 和可选的 reason');
+                    if (Object.keys(args).some(key => !['min', 'max', 'choices', 'reason'].includes(key))) {
+                        throw new Error('随机生成仅接受 min、max 或 choices，以及可选的 reason');
                     }
-                    getRandomToolRangeSize(args.min, args.max);
-                    Object.assign(parsed, { min: args.min, max: args.max, query: `${args.min} ～ ${args.max}`, reason: (args.reason || '').trim() });
+                    if (args.choices !== undefined) {
+                        if (args.min !== undefined || args.max !== undefined) {
+                            throw new Error('choices 与 min、max 只能选择一种方式');
+                        }
+                        if (!Array.isArray(args.choices) || !args.choices.length
+                            || args.choices.some(item => typeof item !== 'string' || !item.trim())) {
+                            throw new Error('choices 必须是至少包含一个非空名称的数组');
+                        }
+                        parsed.choices = [...new Set(args.choices.map(item => item.trim()))];
+                        parsed.query = parsed.choices.join('、');
+                    } else {
+                        getRandomToolRangeSize(args.min, args.max);
+                        Object.assign(parsed, { min: args.min, max: args.max, query: `${args.min} ～ ${args.max}` });
+                    }
+                    parsed.reason = (args.reason || '').trim();
                 } else {
                     if (Object.keys(args).some(key => !['query', 'reason'].includes(key))
                         || typeof args.query !== 'string' || !args.query.trim()) {
@@ -6484,7 +6511,7 @@ const app = createApp({
             const groupKey = getActiveToolUiGroupKey(toolCall);
             if (groupKey === ACTIVE_TOOL_WEB_TYPE) return 'Tavily 联网搜索';
             if (groupKey === ACTIVE_TOOL_KEYWORD_TYPE) return '关键词检索';
-            if (groupKey === ACTIVE_TOOL_RANDOM_TYPE) return '随机数生成';
+            if (groupKey === ACTIVE_TOOL_RANDOM_TYPE) return '随机生成';
             return toolCall?.name || '工具调用';
         };
 
@@ -6500,7 +6527,7 @@ const app = createApp({
             if (groupKey === ACTIVE_TOOL_KEYWORD_TYPE) {
                 return '关键词检索';
             }
-            if (groupKey === ACTIVE_TOOL_RANDOM_TYPE) return '生成随机数';
+            if (groupKey === ACTIVE_TOOL_RANDOM_TYPE) return '随机生成';
             return '工具调用';
         };
 
@@ -6672,7 +6699,7 @@ const app = createApp({
                         toolUi.status = 'running';
                         const isRandom = toolCall.tool.type === ACTIVE_TOOL_RANDOM_TYPE;
                         const results = isRandom
-                            ? [generateRandomNumberForTool(toolCall.min, toolCall.max)]
+                            ? [generateRandomResultForTool(toolCall)]
                             : isWebActiveTool(toolCall.tool)
                                 ? await searchWebByTavilyForTool(toolCall.query, toolCall.tool, toolAbort.signal)
                                 : searchDialogueByKeywordForTool(toolCall.query, toolCall.tool.resultCount, { excludeMessageId: assistantMessage.id });
@@ -8515,6 +8542,7 @@ const app = createApp({
             // 1.7.5 Enforce Default Preset (文风（抗八股）)
             syncBuiltinPreset(BUILTIN_PRESETS.writingStyle);
             syncBuiltinPreset(BUILTIN_PRESETS.storyPanels);
+            syncBuiltinPreset(BUILTIN_PRESETS.lifelike);
 
             // 1.7.5.1 固定 NSFW增强在文风预设之后
             syncBuiltinPreset(BUILTIN_PRESETS.nsfw);
@@ -8910,7 +8938,7 @@ const app = createApp({
             getUncachedInputTokens, formatTokenCount, formatTokenAggregate, formatTokenUsageTime, getTokenUsageTypeLabel, clearTokenUsageHistory,
             storageStats, refreshStorageStats, cleanupUnusedStorage, formatStorageSize,
             showCharacterExportModal, openCharacterExportModal, confirmCharacterExport, // Character Export Modal
-            updateModalRef, latestUpdateConfig,
+            updateModalRef, latestUpdateConfig, latestUpdateDisplay,
             showConfirmModal, confirmMessage, modelMode, isGeminiModel, isTruncationEnabled, isPresetEnabled, chatModelSlots, selectChatModelSlot, reasoningEffortSlider, reasoningEffortLabel, // Export for template
             isGenerating, isRemoteGenerating, remoteEstimatedTime, isReceiving, isThinking, hasActiveToolInlineWork, isConversationBusy, activeToolContinuationMessageId, activeToolContinuationHasResponse, userInput, pendingCardInteraction, clearPendingCardInteraction, pendingChatImages, pendingChatImageReadCount, isRecognizingImages, requestChatImageSelection, handleChatImageSelection, removePendingChatImage, modelSearchQuery, activeModelTag, modelTags, characterSearchQuery, filteredModels, filteredCharacters,
             user, settings, apiProviderOptions, selectedApiProvider, isCustomApiProvider, customApiProviderOptions, showApiProviderSelector, selectApiProvider, characters, currentCharacter, currentCharacterIndex, switchingCharacterIndex, chatHistory, displayedChatMessages, handleChatScroll, presets, presetRoleOptions, fontFamilyOptions, fontSizeOptions, availableImageStyleOptions, imageModelOptions, imageSizeOptions, imageGenCountOptions, scopeOptions, uiTemplatePlacementOptions, worldInfoPositionOptions, getPresetRoleLabel, getPresetRoleDisplayLabel, getPresetRoleBadgeClass, getSortableItemKey, regexScripts, worldInfo,

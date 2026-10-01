@@ -326,7 +326,7 @@
             window.RPHubUpdateCheck.useUpdateCheck();
             const isDark = ref(window.RPHubTheme.current === 'dark');
             const syncTheme = event => { isDark.value = event.detail === 'dark'; };
-            const toggleTheme = event => window.RPHubTheme.set(isDark.value ? 'light' : 'dark', event.currentTarget);
+            const toggleTheme = () => window.RPHubTheme.set(isDark.value ? 'light' : 'dark');
             onMounted(() => window.addEventListener('rphub-theme-change', syncTheme));
             onBeforeUnmount(() => window.removeEventListener('rphub-theme-change', syncTheme));
             const panel = ref(null);
@@ -1163,12 +1163,14 @@
                                 :min="minResultCount" :max="maxResultCount" step="1"
                                 class="compact-range w-full h-1.5 bg-primary-100 rounded-lg appearance-none cursor-pointer accent-primary-500">
                         </div>
-                        <div v-if="webTool" class="max-w-2xl mx-auto bg-white border border-gray-200 rounded-2xl p-5 md:p-6 shadow-sm space-y-5">
-                            <div>
-                                <label class="block text-xs font-bold text-gray-500 uppercase tracking-wide mb-1.5">Tavily API Key</label>
-                                <input :value="tool.tavilyApiKey" @input="$emit('update:tavily-api-key', $event.target.value.trim())" type="password"
-                                    class="w-full bg-white border border-gray-200 rounded-xl px-3 py-2 text-sm text-gray-800 focus:ring-4 focus:ring-primary-500/10 focus:border-primary-500 focus:outline-none transition-all" placeholder="tvly-...">
+                        <div v-if="webTool" class="max-w-2xl mx-auto">
+                            <div class="mb-1.5 flex items-center justify-between gap-3">
+                                <label for="tavily-api-key" class="text-xs font-bold text-gray-500 uppercase tracking-wide">Tavily API Key</label>
+                                <a href="https://www.tavily.com/" target="_blank" rel="noopener noreferrer"
+                                    class="text-primary-600 hover:text-primary-700 hover:underline cursor-pointer transition-colors text-xs normal-case font-medium shrink-0">获取密钥</a>
                             </div>
+                            <input id="tavily-api-key" :value="tool.tavilyApiKey" @input="$emit('update:tavily-api-key', $event.target.value.trim())" type="password"
+                                class="w-full bg-white border border-gray-200 rounded-xl px-3 py-2 text-sm text-gray-800 focus:ring-4 focus:ring-primary-500/10 focus:border-primary-500 focus:outline-none transition-all" placeholder="tvly-...">
                         </div>
                     </div>
                     <div class="p-4 md:p-5 border-t border-gray-100 flex justify-end space-x-3 bg-gray-50/80 backdrop-blur-sm flex-shrink-0">
@@ -2600,7 +2602,7 @@
                         </div>
                     </div>
 
-                    <div v-if="!batchMode" class="absolute top-3 right-3 flex flex-col gap-2 z-20">
+                    <div v-if="!batchMode" class="character-card-actions absolute top-3 right-3 flex flex-col gap-2 z-20">
                         <button @click.stop="$emit('edit')"
                             title="编辑角色" aria-label="编辑角色"
                             class="p-2 bg-white/20 backdrop-blur-md text-white rounded-full border border-white/20 active:bg-white/40 shadow-lg">
@@ -2650,7 +2652,7 @@
                             </div>
                         </div>
 
-                        <div v-if="!batchMode" class="absolute top-3 right-3 flex flex-col gap-2 opacity-0 group-hover:opacity-100 transition-opacity duration-300">
+                        <div v-if="!batchMode" class="character-card-actions absolute top-3 right-3 flex flex-col gap-2 opacity-0 group-hover:opacity-100 transition-opacity duration-300">
                             <button @click.stop="$emit('edit')" class="p-2 bg-white/90 backdrop-blur-sm text-gray-700 hover:text-primary-600 rounded-full shadow-lg transition-all hover:scale-110" title="编辑角色">
                                 <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"></path>
