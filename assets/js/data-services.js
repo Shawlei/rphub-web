@@ -10,6 +10,9 @@
     let mainDb = null;
     let legacyDb = null;
     let initPromise = null;
+    // A cloud restore pauses the page's own saves so its stale state cannot overwrite what comes in; the page
+    // reloads afterwards. Writes passed `force` still go through.
+    let writesPaused = false;
 
     const openAppDB = (name, version = DB_VERSION) => new Promise((resolve, reject) => {
         const request = indexedDB.open(name, version);
@@ -109,6 +112,7 @@
     });
 
     const dbSet = async (key, value, options = {}) => {
+        if (writesPaused && !options.force) return;
         if (!mainDb) await initDB();
         try {
             return await dbSetTo(mainDb, key, value, options);
@@ -165,28 +169,6 @@
         request.onerror = () => reject(request.error);
     });
 
-    const scanStorageEntries = (targetDb, source, inspect) => new Promise((resolve, reject) => {
-        if (!targetDb) return resolve();
-        const request = targetDb.transaction(['store'], 'readonly').objectStore('store').openCursor();
-        request.onsuccess = () => {
-            const cursor = request.result;
-            if (!cursor) return resolve();
-            inspect(source, String(cursor.key), cursor.value);
-            cursor.continue();
-        };
-        request.onerror = () => reject(request.error);
-    });
-
-    const deleteStorageKeys = (targetDb, keys) => new Promise((resolve, reject) => {
-        if (!targetDb || keys.length === 0) return resolve();
-        const transaction = targetDb.transaction(['store'], 'readwrite');
-        const store = transaction.objectStore('store');
-        keys.forEach(key => store.delete(key));
-        transaction.oncomplete = () => resolve();
-        transaction.onerror = () => reject(transaction.error);
-        transaction.onabort = () => reject(transaction.error);
-    });
-
     const getStorageLogicalKey = (key) => {
         const value = String(key || '');
         if (value.startsWith(STORAGE_PREFIX)) return value.slice(STORAGE_PREFIX.length);
@@ -197,7 +179,6 @@
     window.RPHubStorage = Object.freeze({
         cloneForStorage,
         deleteScopedStoredValue: (name, id) => dbDeleteWithLegacy(scopedStorageKey(name, id), legacyScopedStorageKey(name, id)),
-        deleteStorageKeys,
         deleteStoredValue: (name) => dbDeleteWithLegacy(storageKey(name), legacyStorageKey(name)),
         getLegacyDb: () => legacyDb,
         getMainDb: () => mainDb,
@@ -207,8 +188,8 @@
         initDB,
         isDatabaseClosingError,
         readStorageKeys,
-        scanStorageEntries,
         setScopedStoredValue: (name, id, value, options = {}) => dbSet(scopedStorageKey(name, id), value, options),
+        setWritesPaused: (paused) => { writesPaused = paused; },
         setStoredValue: (name, value, options = {}) => dbSet(storageKey(name), value, options),
         unwrapForStorage
     });
@@ -727,8 +708,9 @@
             });
 
             const recallCount = Number(message._enhancedMemoryRecallCount) || 0;
-            const isMemory = recallCount > 0 || (message.role !== 'system' && isRoleMemoryContextContent(message.content));
-            if (isMemory) {
+            // 附加召回片段不改变原消息的角色，仍保留记忆提示和高亮。
+            const isMemory = message.role !== 'system' && isRoleMemoryContextContent(message.content);
+            if (isMemory || recallCount > 0) {
                 const memoryName = recallCount ? '增强记忆召回' : '角色记忆';
                 const memoryTrigger = recallCount ? `已注入 ${recallCount} 条总结` : '已注入';
                 injectedWorldInfos.set(memoryName, memoryTrigger);
@@ -754,7 +736,7 @@
                 /\[M\d{1,6}\]/g,
                 '<mark class="bg-primary-200/80 text-primary-900 border-b border-primary-400 font-bold px-1 rounded shadow-sm">$&</mark>'
             );
-            if (isMemory) {
+            if (isMemory || recallCount > 0) {
                 renderedContent = renderedContent.replace(
                     /&lt;\/?(?:enhanced_memory_recall|memory_fragment)\b[\s\S]*?&gt;/g,
                     '<mark class="bg-primary-200/80 text-primary-900 border-b border-primary-400 font-bold px-1 rounded shadow-sm">$&</mark>'

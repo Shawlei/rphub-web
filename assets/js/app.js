@@ -1,9 +1,9 @@
 const { createApp, ref, reactive, computed, onMounted, onBeforeUnmount, watch, nextTick } = Vue;
-const { useStorageManagement, useTokenUsage } = window.RPHubComposables;
+const { useTokenUsage } = window.RPHubComposables;
 const { createMessageRenderer } = window.RPHubMessageRenderer;
 const { AppNavigation } = window.RPHubLayoutComponents;
 const { requestChatCompletion, requestJson } = window.RPHubApiClient;
-const { buildApiEndpoint } = window.RPHubApiUtils;
+const { buildApiEndpoint, buildUserInputToolMessages } = window.RPHubApiUtils;
 const {
     ActionConfirmModal,
     ActiveToolEditorModal,
@@ -109,7 +109,6 @@ const {
 const {
     cloneForStorage,
     deleteScopedStoredValue,
-    deleteStorageKeys,
     deleteStoredValue,
     getLegacyDb,
     getMainDb,
@@ -119,7 +118,6 @@ const {
     initDB,
     isDatabaseClosingError,
     readStorageKeys,
-    scanStorageEntries,
     setScopedStoredValue,
     setStoredValue,
     unwrapForStorage
@@ -990,9 +988,9 @@ const app = createApp({
         const isConversationBusy = computed(() => isGenerating.value || isRemoteGenerating.value || hasActiveToolInlineWork.value);
 
         const presets = ref([]);
-        // Gemini 模型一律不发送 COT 与 NSFW增强；只临时停用，不改写用户保存的开关状态。
-        const isPresetBlockedForModel = preset => isGeminiModel.value && ['COT', BUILTIN_PRESETS.nsfw.name].includes(preset?.name);
-        const isPresetEnabled = preset => preset.enabled !== false && !isPresetBlockedForModel(preset);
+        // 抗截断只临时停用 COT，不改写用户保存的开关状态。
+        const isPresetEnabled = preset => preset.enabled !== false
+            && (preset.name !== 'COT' || !isTruncationEnabled.value);
         const isStoryPanelsEnabled = computed(() => presets.value.some(preset => preset.name === BUILTIN_PRESETS.storyPanels.name
             && preset.enabled !== false && String(preset.content || '').trim()));
         const normalizePresetRole = (role) => (
@@ -1457,26 +1455,16 @@ const app = createApp({
             }) });
         };
         const {
-            cleanupUnusedStorage,
-            formatStorageSize,
-            refreshStorageStats,
-            storageStats
-        } = useStorageManagement({
-            characters,
-            confirm: (...args) => confirmAction(...args),
-            deleteStorageKeys,
-            ensureStorage: async () => {
-                if (!getMainDb()) await initDB();
-            },
-            getBranchOwnerId: scopeId => getStoryBranchOwnerId(scopeId),
-            getLegacyDb,
-            getMainDb,
-            getStorageLogicalKey,
-            globalUiTemplates,
-            readStorageKeys,
-            saveStoredValue: setStoredValue,
-            scanStorageEntries,
-            scopedStorageNames: CHARACTER_SCOPED_STORAGE_NAMES,
+            cloudBackup,
+            closeCloudBackup,
+            copyCloudBackupKey,
+            formatCloudBackupTime,
+            openCloudBackup,
+            readCloudBackup,
+            startCloudBackup,
+            startCloudRestore
+        } = window.RPHubCloudBackup.useCloudBackup({
+            saveAll: () => saveData(),
             toast: (...args) => showToast(...args)
         });
         // Export Modal State
@@ -4999,7 +4987,6 @@ const app = createApp({
                 ? `(${BUILTIN_PROMPTS.replyToolInstruction.replace(/。$/, '')})` : '';
             target.content = `${String(target.content || '').trimEnd()}${replyToolReminder}\n\n${prompt}`;
         };
-        const usedGeminiPromptNonces = new Set();
         const generateResponse = async (startTime = null, options = {}) => {
             const reuseGeneratingState = options.reuseGeneratingState === true;
             if (isGenerating.value && !reuseGeneratingState) return;
@@ -5007,6 +4994,9 @@ const app = createApp({
             const continueAssistantMessageId = options.continueAssistantMessageId || null;
             const continuationToolCallId = options.continuationToolCallId || null;
             const requestModel = settings.model;
+            const obfuscateInput = /gemini/i.test(String(requestModel || ''));
+            const latestUserMessage = [...chatHistory.value].reverse().find(message => message?.role === 'user');
+            const latestUserIndex = chatHistory.value.indexOf(latestUserMessage);
             const requestTools = activeToolDepth < ACTIVE_TOOL_MAX_AUTO_CONTINUE ? getEnabledActiveTools() : [];
 
             if (!currentCharacter.value) {
@@ -5063,15 +5053,6 @@ const app = createApp({
             const enabledPresets = presets.value
                 .map(normalizePreset)
                 .filter(p => isPresetEnabled(p) && p.content.trim());
-            const noncePreset = enabledPresets.find(p => p.role === 'system');
-            if (/gemini/i.test(requestModel) && noncePreset) {
-                let nonce;
-                do {
-                    nonce = Math.random().toString(36).slice(2, 8 + Math.floor(Math.random() * 3));
-                } while (!/^(?=.*[a-z])(?=.*\d)[a-z\d]{6,8}$/.test(nonce) || usedGeminiPromptNonces.has(nonce));
-                usedGeminiPromptNonces.add(nonce);
-                noncePreset.content = `${nonce}\n${noncePreset.content}`;
-            }
             const writingStylePresets = enabledPresets.filter(p => p.name === BUILTIN_PRESETS.writingStyle.name);
             const cotPresets = enabledPresets.filter(p => p.name === 'COT');
             const systemPresets = enabledPresets.filter(p => p.name !== 'COT'
@@ -5128,9 +5109,10 @@ const app = createApp({
             systemPromptParts.push(userPrompt);
 
             // 7. 记忆引用：正文承接某条总结记忆时在句末标注编号，界面据此展示判断依据。
-            if (memorySettings.enabled && classicMemories.value.length > 0) {
-                systemPromptParts.push(BUILTIN_PROMPTS.memoryCitationInstruction);
-            }
+            // 聊天还没超过保留楼层时上下文里没有总结记忆，不发送引用要求。
+            const memoryCitationEnabled = memorySettings.enabled && classicMemories.value.length > 0
+                && postprocessedChatHistory.length > memorySettings.summaryKeepFloors;
+            if (memoryCitationEnabled) systemPromptParts.push(BUILTIN_PROMPTS.memoryCitationInstruction);
 
             const activeToolPrompt = buildActiveToolSystemPrompt(requestTools);
             if (activeToolPrompt) systemPromptParts.push(activeToolPrompt);
@@ -5143,7 +5125,8 @@ const app = createApp({
             if (mainModelUiTemplatePrompt) systemPromptParts.push(mainModelUiTemplatePrompt);
 
             if (cotPresets.length > 0) {
-                systemPromptParts.push(cotPresets.map(p => p.content).join('\n\n---\n\n'));
+                const cotContent = cotPresets.map(p => p.content).join('\n\n---\n\n');
+                systemPromptParts.push(memoryCitationEnabled ? cotContent : cotContent.replace(`${BUILTIN_PROMPTS.memoryCitationCotLine}\n`, ''));
             }
 
             const systemPrompt = systemPromptParts.join('\n\n');
@@ -5477,16 +5460,26 @@ const app = createApp({
                 }
                 if (requestSignal.aborted) throw createAbortReason();
 
+                // 最后再搬移整条用户消息，连同世界书、召回和本轮附加要求一起交给工具。
+                const inputIndex = obfuscateInput ? messages.findIndex(message => message.role === 'user'
+                    && message._sourceIndexes?.includes(latestUserIndex)) : -1;
+                if (inputIndex >= 0) {
+                    const inputMessage = messages[inputIndex];
+                    const [inputCall, inputResult] = buildUserInputToolMessages(inputMessage.content, `call_${generateUUID()}`);
+                    inputMessage.content = '读取 read_user_input 的返回内容，作为本轮用户输入继续回复。'
+                        + (isTruncationEnabled.value ? `(${BUILTIN_PROMPTS.replyToolInstruction.replace(/。$/, '')})` : '');
+                    for (const key of ['_worldInfoEntries', '_enhancedMemoryRecallCount']) {
+                        inputResult[key] = inputMessage[key];
+                        delete inputMessage[key];
+                    }
+                    messages.splice(inputIndex + 1, 0, inputCall, inputResult);
+                }
+
                 // 必须在正则、角色合并和记忆处理之后追加，保留 tool_call_id 及服务端签名。
                 messages.push(...activeToolMessages);
                 // 上下文查看器的数据只给弹窗用，长对话里整理一次要上百毫秒，等请求发出后再做。
                 const contextViewerInput = { messages, budgetedEntries, triggeredEntries, postprocessedChatHistory, worldInfoSettings };
-                setTimeout(() => {
-                    const contextViewerState = buildContextViewerState(contextViewerInput);
-                    lastContextMessages.value = contextViewerState.contextMessages;
-                    lastTriggeredWorldInfos.value = contextViewerState.triggeredWorldInfos;
-                }, 0);
-
+                const inputPrompt = inputIndex >= 0 ? messages[inputIndex].content : '';
                 const apiMessages = messages.map(({ role, name, content, tool_calls, tool_call_id, reasoning_content, reasoning, reasoning_details, extra_content }) => ({
                     role,
                     name,
@@ -5498,9 +5491,26 @@ const app = createApp({
                     ...(reasoning_details ? { reasoning_details } : {}),
                     ...(extra_content ? { extra_content } : {})
                 }));
+                const prepareRequest = () => {
+                    if (inputIndex >= 0) {
+                        // UUID 转成零宽字符，每次实际请求（含自动重试）生成新的前缀。
+                        const alphabet = '\u200B\u200C\u200D\u2060';
+                        const prefix = [...generateUUID().replace(/-/g, '')].map(char => {
+                            const value = parseInt(char, 16);
+                            return alphabet[value >> 2] + alphabet[value & 3];
+                        }).join('');
+                        messages[inputIndex].content = apiMessages[inputIndex].content = prefix + inputPrompt;
+                    }
+                    setTimeout(() => {
+                        const contextViewerState = buildContextViewerState(contextViewerInput);
+                        lastContextMessages.value = contextViewerState.contextMessages;
+                        lastTriggeredWorldInfos.value = contextViewerState.triggeredWorldInfos;
+                    }, 0);
+                };
                 const responseResult = await requestTrackedChatCompletion({
                     model: requestModel,
                     messages: apiMessages,
+                    onBeforeRequest: prepareRequest,
                     logResponse: true,
                     replyInTool: isTruncationEnabled.value,
                     tools: buildActiveToolDefinitions(requestTools),
@@ -8689,6 +8699,7 @@ const app = createApp({
                 () => activeUiTemplates.value.length,
                 isStoryPanelsEnabled,
                 () => settings.model,
+                isTruncationEnabled,
                 () => presets.value.find(preset => preset.name === cotPresetName)?.enabled
             ], syncDynamicPresetContent);
             removeLegacyUserRegex();
@@ -8990,8 +9001,8 @@ const app = createApp({
             open: showMemoryCitation,
             frameStyle: () => {
                 const tone = getComputedStyle(document.documentElement).getPropertyValue('--primary-500').trim() || '99 102 241';
-                return `.memory-cite-text{text-decoration:underline dotted rgb(${tone});text-decoration-thickness:1.5px;text-underline-offset:.3em;cursor:pointer}`
-                    + `.memory-cite{display:inline-flex;align-items:center;justify-content:center;min-width:1.4em;height:1.4em;margin:0 .15em;padding:0 .35em;border:0;border-radius:999px;background:rgb(${tone} / .14);color:rgb(${tone});font:700 .68em/1 system-ui,sans-serif;vertical-align:.35em;cursor:pointer}`;
+                return `.memory-cite-text{text-decoration:underline dotted rgb(${tone} / .75);text-decoration-thickness:1.5px;text-underline-offset:.3em;cursor:pointer}`
+                    + `.memory-cite{display:inline-flex;align-items:center;justify-content:center;min-width:1.4em;height:1.4em;margin:0 .15em;padding:0 .35em;border:0;border-radius:999px;background:rgb(${tone} / .14);color:rgb(${tone});font:700 .75em/1 system-ui,sans-serif;vertical-align:.4em;cursor:pointer}`;
             }
         };
 
@@ -9039,10 +9050,10 @@ const app = createApp({
             filteredTokenUsageHistory, tokenUsageStats, displayedTokenUsageHistory,
             latestMainTokenUsage, formatLatestTokenCount,
             getUncachedInputTokens, formatTokenCount, formatTokenAggregate, formatTokenUsageTime, getTokenUsageCategory, clearTokenUsageHistory,
-            storageStats, refreshStorageStats, cleanupUnusedStorage, formatStorageSize,
+            cloudBackup, openCloudBackup, closeCloudBackup, startCloudBackup, readCloudBackup, startCloudRestore, copyCloudBackupKey, formatCloudBackupTime,
             showCharacterExportModal, openCharacterExportModal, confirmCharacterExport, // Character Export Modal
             updateModalRef, latestUpdateConfig, latestUpdateDisplay,
-            showConfirmModal, confirmMessage, modelMode, isGeminiModel, isTruncationEnabled, isPresetEnabled, isPresetBlockedForModel, chatModelSlots, selectChatModelSlot, reasoningEffortSlider, reasoningEffortLabel, // Export for template
+            showConfirmModal, confirmMessage, modelMode, isGeminiModel, isTruncationEnabled, isPresetEnabled, chatModelSlots, selectChatModelSlot, reasoningEffortSlider, reasoningEffortLabel, // Export for template
             isGenerating, isRemoteGenerating, remoteEstimatedTime, isReceiving, isThinking, hasActiveToolInlineWork, isConversationBusy, activeToolContinuationMessageId, activeToolContinuationHasResponse, userInput, pendingCardInteraction, clearPendingCardInteraction, pendingChatImages, pendingChatImageReadCount, isRecognizingImages, requestChatImageSelection, handleChatImageSelection, removePendingChatImage, modelSearchQuery, activeModelTag, modelTags, characterSearchQuery, filteredModels, filteredCharacters,
             user, settings, apiProviderOptions, selectedApiProvider, isCustomApiProvider, customApiProviderOptions, showApiProviderSelector, selectApiProvider, characters, currentCharacter, currentCharacterAvatar, currentCharacterIndex, switchingCharacterIndex, chatHistory, displayedChatMessages, handleChatScroll, presets, presetRoleOptions, fontSizeOptions, availableImageStyleOptions, imageModelOptions, imageSizeOptions, imageGenCountOptions, scopeOptions, uiTemplatePlacementOptions, worldInfoPositionOptions, getPresetRoleLabel, getPresetRoleDisplayLabel, getPresetRoleBadgeClass, getSortableItemKey, regexScripts, worldInfo,
             activeTools, activeToolAggressivenessOptions: ACTIVE_TOOL_AGGRESSIVENESS_OPTIONS, editingActiveTool, normalizeActiveTools, isWebActiveTool, getActiveToolDisplayDescription, getActiveToolResultCountMin, getActiveToolResultCountMax,
