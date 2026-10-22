@@ -2,12 +2,12 @@
 // pieces named by the SHA-256 of their JSON, so whatever the server already holds is skipped. The key it returns
 // merges them into another device or browser within 15 days. The service is the one in `rphub-update-api`.
 (function () {
-    const { markRaw, reactive } = Vue;
+    const { reactive } = Vue;
     const apiUrl = String(document.querySelector('meta[name="rphub-update-api"]')?.content || '')
         .trim()
         .replace(/\/+$/, '');
     const MB = 1024 * 1024;
-    const MAX_BACKUP_BYTES = 500 * MB;
+    const MAX_BACKUP_BYTES = 1024 * MB;
     const SCOPED_NAMES = ['chat', 'branches'];
     const LAST_BACKUP_STORAGE_KEY = 'rp_hub_cloud_backup';
     const encoder = new TextEncoder();
@@ -96,7 +96,8 @@
         return owners;
     };
 
-    const createBackup = async (onProgress) => {
+    // `replaces` is this device's previous key, which the server retires once the new backup exists.
+    const createBackup = async (onProgress, replaces) => {
         const { getScopedStoredValue, getStoredValue } = storage();
         const characters = ((await getStoredValue('characters')) || []).filter(character => character?.uuid);
         if (!characters.length) throw new Error('还没有角色卡可以备份');
@@ -110,7 +111,7 @@
         const measure = async (piece, value) => {
             const bytes = encode(value);
             totalBytes += bytes.length;
-            if (totalBytes > MAX_BACKUP_BYTES) throw new Error('角色卡和聊天加起来超过 500MB，超出单次备份上限');
+            if (totalBytes > MAX_BACKUP_BYTES) throw new Error('角色卡和聊天加起来超过 1GB，超出单次备份上限');
             Object.assign(piece, { hash: await sha256(bytes), size: bytes.length });
             pieces.push(piece);
             onProgress({ label: '正在整理数据', percent: pieces.length / total * 100, detail: `${pieces.length} / ${total} 项` });
@@ -161,7 +162,7 @@
             report();
         }
         onProgress({ label: '正在生成密钥', percent: 100, detail: '' });
-        return { ...await postJson('/v1/backup', { characters: manifest }), total: pieces.length, skipped };
+        return { ...await postJson('/v1/backup', { characters: manifest, replaces }), total: pieces.length, skipped };
     };
 
     // Look-alike letters are read as the digits they resemble, as the server does.
@@ -264,8 +265,7 @@
             progress: null, // { label, percent, detail }
             key: '',
             expiresAt: 0,
-            restoreKey: '',
-            plan: null
+            restoreKey: ''
         });
         try {
             const last = JSON.parse(localStorage.getItem(LAST_BACKUP_STORAGE_KEY) || 'null');
@@ -290,7 +290,7 @@
         };
 
         const openCloudBackup = (mode) => {
-            Object.assign(cloudBackup, { mode, plan: null });
+            cloudBackup.mode = mode;
         };
         const closeCloudBackup = () => {
             if (!cloudBackup.busy) cloudBackup.mode = '';
@@ -299,29 +299,29 @@
         const startCloudBackup = () => run(async () => {
             setProgress({ label: '正在保存当前数据', percent: 0, detail: '' });
             await saveAll();
-            const { key, expiresAt, total, skipped } = await createBackup(setProgress);
+            const { key, expiresAt, total, skipped, replaced } = await createBackup(setProgress, cloudBackup.key || undefined);
             Object.assign(cloudBackup, { key, expiresAt });
             try {
                 localStorage.setItem(LAST_BACKUP_STORAGE_KEY, JSON.stringify({ key, expiresAt }));
             } catch (_) { /* The key is still shown in the dialog. */ }
-            toast(skipped ? `备份完成：共 ${total} 项，其中 ${skipped} 项云端已有，已跳过` : `备份完成：共 ${total} 项`, 'success');
+            const summary = skipped ? `备份完成：共 ${total} 项，其中 ${skipped} 项云端已有，已跳过` : `备份完成：共 ${total} 项`;
+            toast(replaced ? `${summary}；旧密钥已作废` : summary, 'success');
         });
 
-        const readCloudBackup = () => run(async () => {
+        // Reads the backup and merges it at once; the dialog states the rules, the closing message the counts.
+        const startCloudRestore = () => run(async () => {
             setProgress({ label: '正在读取备份', percent: 0, detail: '' });
             const plan = await fetchBackup(cloudBackup.restoreKey, setProgress);
             if (!plan.added.length && !plan.replaced.length) {
                 toast('备份里的角色卡本机都有且完全相同，无需恢复', 'info');
                 return;
             }
-            // Raw, because its cards go straight into IndexedDB, which cannot store Vue proxies.
-            cloudBackup.plan = markRaw(plan);
-        });
-
-        const startCloudRestore = () => run(async () => {
-            await applyBackup(cloudBackup.plan, setProgress);
-            setProgress({ label: '恢复完成，正在刷新页面', percent: 100, detail: '' });
-            setTimeout(() => location.reload(), 800);
+            await applyBackup(plan, setProgress);
+            const counts = [`新增 ${plan.added.length} 个`, `替换 ${plan.replaced.length} 个`, `跳过 ${plan.skipped.length} 个`]
+                .filter(text => !text.includes(' 0 个'));
+            setProgress({ label: '恢复完成，正在刷新页面', percent: 100, detail: counts.join('，') });
+            toast(`恢复完成：${counts.join('，')}`, 'success', 3000);
+            setTimeout(() => location.reload(), 1500);
             // Keeps the dialog locked until the page reloads.
             await new Promise(() => {});
         });
@@ -334,7 +334,7 @@
 
         return {
             cloudBackup, closeCloudBackup, copyCloudBackupKey, formatCloudBackupTime, openCloudBackup,
-            readCloudBackup, startCloudBackup, startCloudRestore
+            startCloudBackup, startCloudRestore
         };
     };
 
