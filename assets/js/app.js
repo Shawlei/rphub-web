@@ -2664,14 +2664,20 @@ const app = createApp({
                 if (isOpenAI) {
                     // OpenAI 兼容生图：同步 POST /images/generations，直接返回图片 URL。
                     // prompt 原样直传（逗号/空格合法）；HTML 属性截断只会丢尾部一个空格，trim 兜底。
+                    // C0/C1 控制字符必须清掉：模型偶发输出的损坏字节（如 U+0089）会让渠道的
+                    // Go JSON 解析报 invalid character '\u0089'。
+                    const sanitizePromptText = text => String(text || '')
+                        .replace(/[\u0000-\u001F\u007F-\u009F]/g, ' ')
+                        .replace(/[\uDC00-\uDFFF]/g, '')
+                        .trim();
                     const sizeMap = { '竖图': '832x1216', '横图': '1216x832', '方图': '1024x1024' };
                     const body = {
-                        model: request.searchParams.get('model') || '',
-                        prompt: (request.searchParams.get('prompt') || '').trim(),
+                        model: sanitizePromptText(request.searchParams.get('model')),
+                        prompt: sanitizePromptText(request.searchParams.get('prompt')),
                         size: sizeMap[request.searchParams.get('size')] || '1024x1024',
                         n: 1
                     };
-                    const negative = request.searchParams.get('negative_prompt');
+                    const negative = sanitizePromptText(request.searchParams.get('negative_prompt'));
                     if (negative) body.negative_prompt = negative;
                     const data = await fetchImageJobJson(new URL(request.pathname, request.origin).href, {
                         method: 'POST',
