@@ -598,6 +598,7 @@ const app = createApp({
             uiTemplateMainModelAnalysis: true,
             fontSize: window.innerWidth > 768 ? 16 : 14,
             imageGenKey: '',
+            imageGenKeys: {},
             imageGenProviderId: 'sta1n',
             imageGenBaseUrl: IMAGE_GEN_BASE_URL,
             customImageGenUrl: '',
@@ -724,14 +725,28 @@ const app = createApp({
             return getImageGenProviderById(settings.imageGenProviderId) || customImageGenProviderOption;
         });
         const isCustomImageGenProvider = computed(() => isCustomImageGenProviderId(selectedImageGenProvider.value.id));
+        const syncCurrentImageGenKeyToProvider = () => {
+            const providerId = settings.imageGenProviderId;
+            settings.imageGenKeys[providerId] = settings.imageGenKey || '';
+        };
         const selectImageGenProvider = (provider) => {
+            syncCurrentImageGenKeyToProvider();
             settings.imageGenProviderId = provider.id;
             settings.imageGenBaseUrl = isCustomImageGenProviderId(provider.id)
                 ? settings.customImageGenUrl || ''
                 : provider.baseUrl;
+            settings.imageGenKey = settings.imageGenKeys[provider.id] || '';
             showImageGenProviderSelector.value = false;
         };
         const normalizeImageGenProviderSettings = () => {
+            if (!settings.imageGenKeys || typeof settings.imageGenKeys !== 'object' || Array.isArray(settings.imageGenKeys)) {
+                settings.imageGenKeys = {};
+            }
+            [...imageGenProviders, customImageGenProviderOption].forEach(provider => {
+                if (typeof settings.imageGenKeys[provider.id] !== 'string') {
+                    settings.imageGenKeys[provider.id] = '';
+                }
+            });
             if (!isCustomImageGenProviderId(settings.imageGenProviderId) && !getImageGenProviderById(settings.imageGenProviderId)) {
                 settings.imageGenProviderId = 'sta1n';
             }
@@ -742,6 +757,11 @@ const app = createApp({
                 settings.imageGenProviderId = provider.id;
                 settings.imageGenBaseUrl = provider.baseUrl;
             }
+            // 老版本单一密钥迁移到当前/默认渠道，避免升级后密钥丢失
+            if (settings.imageGenKey && !settings.imageGenKeys[settings.imageGenProviderId]) {
+                settings.imageGenKeys[settings.imageGenProviderId] = settings.imageGenKey;
+            }
+            settings.imageGenKey = settings.imageGenKeys[settings.imageGenProviderId] || '';
         };
         normalizeImageGenProviderSettings();
 
@@ -4023,7 +4043,10 @@ const app = createApp({
             if (isManual) showToast('正在获取生图模型列表...', 'info');
             imageGenModelsLoading.value = true;
             try {
-                const response = await fetch(`${baseUrl}/models`, { method: 'GET' });
+                // 生图渠道（NAI 中转 / OpenAI 兼容）统一走 /v1/models，自动补齐 /v1 前缀
+                const url = buildApiEndpoint(settings.imageGenBaseUrl, 'models');
+                const response = await fetch(url, { method: 'GET' });
+                if (!response.ok) throw new Error(`HTTP ${response.status}`);
                 const data = await response.json();
                 const rawList = Array.isArray(data)
                     ? data
@@ -7476,7 +7499,11 @@ const app = createApp({
 
         };
 
-        watch(() => settings.imageGenKey, () => {
+        watch(() => settings.imageGenKey, (newKey) => {
+            const providerId = settings.imageGenProviderId;
+            if (settings.imageGenKeys[providerId] !== (newKey || '')) {
+                settings.imageGenKeys[providerId] = newKey || '';
+            }
             enforceSpecialRules();
             if (isAutoImageGenEnabled.value) {
                 updateImageGenRegexState({ enableRegex: true });
