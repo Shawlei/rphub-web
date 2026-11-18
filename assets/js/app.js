@@ -2556,6 +2556,20 @@ const app = createApp({
             return payload;
         };
 
+        // OpenAI 兼容渠道返回的图片 URL 常需带鉴权头下载（img 直连会 401），或指向内网地址。
+        // 转成 data URL 一次拉取、零二次请求；失败则回退原 URL 让 img 直连兜底。
+        const downloadImageAsDataUrl = async (rawUrl, token) => {
+            const response = await fetch(rawUrl, { headers: token ? { 'Authorization': `Bearer ${token}` } : {} });
+            if (!response.ok) throw new Error(`下载图片失败 HTTP ${response.status}`);
+            const blob = await response.blob();
+            return await new Promise((resolve, reject) => {
+                const fr = new FileReader();
+                fr.onload = () => resolve(fr.result);
+                fr.onerror = () => reject(new Error('图片数据读取失败'));
+                fr.readAsDataURL(blob);
+            });
+        };
+
         // ==== 锁图机制 (迁移)：生成完成即固化到消息，切换画风/模型不再重刷、不再重复扣点 ====
         const lockGeneratedImageToMessage = (card, imageUrl, requestUrl) => {
             if (!card || !imageUrl) return;
@@ -2665,8 +2679,12 @@ const app = createApp({
                         body: JSON.stringify(body)
                     });
                     const item = Array.isArray(data?.data) ? data.data[0] : null;
-                    // b64 优先：data URL 无二次请求风险（部分中转的 url 打不开或需鉴权）
-                    const imageUrl = (item?.b64_json ? `data:image/png;base64,${item.b64_json}` : '') || item?.url || '';
+                    // b64 优先（零二次请求）；其次 url 走 fetch+鉴权下载转 dataURL（img 直连 401 常见坑）
+                    let imageUrl = item?.b64_json ? `data:image/png;base64,${item.b64_json}` : '';
+                    if (!imageUrl && item?.url) {
+                        const rawUrl = new URL(item.url, request.origin).href;
+                        imageUrl = await downloadImageAsDataUrl(rawUrl, task.token).catch(() => rawUrl);
+                    }
                     if (!imageUrl) throw new Error('生图渠道未返回图片');
                     const job = { status: 'done', id: `openai-${Date.now()}-${Math.random().toString(36).slice(2)}`, imageUrl };
                     publish(job);
