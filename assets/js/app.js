@@ -2648,6 +2648,22 @@ const app = createApp({
             }
         };
 
+        // \p{C} = Cc/Cf/Cs/Co/Cn（控制符、格式符、代理对、私用区、未分配码位）。
+        // 用 new RegExp 构造：引擎不支持 Unicode 属性时在 try 里回退，不会解析期 SyntaxError 打死整个脚本。
+        // 两类分开处理：零宽类（Cf/Cs/Co/Cn）直接删掉，控制类（Cc）换成空格，避免单词粘连。
+        const makeRe = (pattern, fallback) => {
+            try { return new RegExp(pattern, 'gu'); } catch (e) { return fallback; }
+        };
+        const ZERO_WIDTH_CHARS_RE = makeRe('\\p{Cf}|\\p{Cs}|\\p{Co}|\\p{Cn}',
+            /[\uD800-\uDFFF\uE000-\uF8FF\uFFFE\uFFFF\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFEFF]/g);
+        const CONTROL_CHARS_RE = makeRe('\\p{Cc}', /[\u0000-\u001F\u007F-\u009F]/g);
+
+        // 请求体纯 ASCII 序列化：JSON.stringify 后把所有 >= U+007F 的码位转成 \uXXXX。
+        // 线上字节不含任何高位字节，Go/Rust/Python 的 JSON 解析器都不可能被 UTF-8 字节绊倒；
+        // 渠道侧解码后拿到的字符串与原文完全一致，语义零损失。
+        const toAsciiJson = (value) => JSON.stringify(value).replace(/[\u007f-\uffff]/g, ch =>
+            '\\u' + ch.charCodeAt(0).toString(16).padStart(4, '0'));
+
         const startGeneratedImageTask = (requestUrl, fresh = false) => {
             const request = new URL(requestUrl, window.location.href);
             const token = request.searchParams.get('token') || settings.imageGenKey.trim();
@@ -2664,12 +2680,19 @@ const app = createApp({
                 if (isOpenAI) {
                     // OpenAI 兼容生图：同步 POST /images/generations，直接返回图片 URL。
                     // prompt 原样直传（逗号/空格合法）；HTML 属性截断只会丢尾部一个空格，trim 兜底。
-                    // C0/C1 控制字符必须清掉：模型偶发输出的损坏字节（如 U+0089）会让渠道的
-                    // Go JSON 解析报 invalid character '\u0089'。
-                    const sanitizePromptText = text => String(text || '')
-                        .replace(/[\u0000-\u001F\u007F-\u009F]/g, ' ')
-                        .replace(/[\uDC00-\uDFFF]/g, '')
-                        .trim();
+                    // v42 只清 C0/C1 后渠道仍报 invalid character '\u0089'：文本要走
+                    // 「模型输出 → 正则替换 → HTML 属性 → URL → searchParams 解码」整条链，
+                    // 中途还可能带上 Cf 格式符 / Co 私用区 / 孤立代理对 / U+FFFF 等 \p{C} 字符。
+                    // C16 起两道闸：① \p{C} 全清 ② 请求体整趟 \uXXXX 转义成纯 ASCII。
+                    const sanitizePromptText = text => {
+                        let value = String(text == null ? '' : text);
+                        try { value = value.normalize('NFC'); } catch (e) { }
+                        return value
+                            .replace(ZERO_WIDTH_CHARS_RE, '')
+                            .replace(CONTROL_CHARS_RE, ' ')
+                            .replace(/\s+/g, ' ')
+                            .trim();
+                    };
                     const sizeMap = { '竖图': '832x1216', '横图': '1216x832', '方图': '1024x1024' };
                     const body = {
                         model: sanitizePromptText(request.searchParams.get('model')),
@@ -2679,11 +2702,22 @@ const app = createApp({
                     };
                     const negative = sanitizePromptText(request.searchParams.get('negative_prompt'));
                     if (negative) body.negative_prompt = negative;
-                    const data = await fetchImageJobJson(new URL(request.pathname, request.origin).href, {
-                        method: 'POST',
-                        headers: { 'content-type': 'application/json', 'Authorization': `Bearer ${task.token}` },
-                        body: JSON.stringify(body)
-                    });
+                    const postUrl = new URL(request.pathname, request.origin).href;
+                    const wireBody = toAsciiJson(body);
+                    console.debug('[image-gen] POST', postUrl, wireBody);
+                    let data;
+                    try {
+                        data = await fetchImageJobJson(postUrl, {
+                            method: 'POST',
+                            headers: { 'content-type': 'application/json', 'Authorization': `Bearer ${task.token}` },
+                            body: wireBody
+                        });
+                    } catch (err) {
+                        // 把实际发出去的字节回显在错误里：渠道再报解析错，就能一眼看出
+                        // 是我们发了脏字节，还是渠道自己在解析别的东西。
+                        const preview = wireBody.length > 400 ? `${wireBody.slice(0, 400)}…` : wireBody;
+                        throw new Error(`${err.message} [上行 ${wireBody.length}B 纯ASCII] ${preview}`);
+                    }
                     const item = Array.isArray(data?.data) ? data.data[0] : null;
                     // b64 优先（零二次请求）；其次 url 走 fetch+鉴权下载转 dataURL（img 直连 401 常见坑）
                     let imageUrl = item?.b64_json ? `data:image/png;base64,${item.b64_json}` : '';
