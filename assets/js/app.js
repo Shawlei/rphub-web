@@ -9231,7 +9231,7 @@ const app = createApp({
         const exportPlugin = (plugin) => {
             const payload = {
                 format: PLUGIN_FORMAT,
-                version: 1,
+                formatVersion: 1,
                 id: plugin.id,
                 name: plugin.name,
                 version: plugin.version,
@@ -9252,7 +9252,7 @@ const app = createApp({
             }
             const payload = {
                 format: PLUGIN_BUNDLE_FORMAT,
-                version: 1,
+                formatVersion: 1,
                 exportedAt: new Date().toISOString(),
                 plugins: plugins.value.map(plugin => ({
                     id: plugin.id,
