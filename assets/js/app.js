@@ -2612,9 +2612,9 @@ const app = createApp({
             }
 
             const imageUrl = job.imageUrl
-                ? new URL(job.imageUrl, task.baseUrl).href
+                ? new URL(job.imageUrl, request.origin || task.baseUrl).href
                 : job.id
-                    ? `${task.baseUrl}/api/jobs/${encodeURIComponent(job.id)}/content?token=${encodeURIComponent(task.token)}`
+                    ? new URL(`/api/jobs/${encodeURIComponent(job.id)}/content`, request.origin || task.baseUrl).href + `?token=${encodeURIComponent(task.token)}`
                     : '';
             if (!imageUrl) {
                 card.classList.remove('is-generating');
@@ -2640,7 +2640,7 @@ const app = createApp({
             request.searchParams.set('token', token);
             const key = fresh ? `${request.href}#${Date.now()}-${Math.random()}` : request.href;
             if (generatedImageTasks.has(key)) return generatedImageTasks.get(key);
-            const task = { key, requestUrl: request.href, baseUrl: request.origin, token, cards: new Set(), job: null };
+            const task = { key, requestUrl: request.href, baseUrl: request.origin, request, token, cards: new Set(), job: null };
             const publish = (job) => {
                 task.job = job;
                 [...task.cards].forEach(card => renderGeneratedImageJob(card, task, job));
@@ -2648,29 +2648,31 @@ const app = createApp({
             const isOpenAI = request.pathname.includes('/images/generations');
             task.promise = (async () => {
                 if (isOpenAI) {
-                    // OpenAI 兼容生图：同步 POST /images/generations，直接返回图片 URL
+                    // OpenAI 兼容生图：同步 POST /images/generations，直接返回图片 URL。
+                    // prompt 原样直传（逗号/空格合法）；HTML 属性截断只会丢尾部一个空格，trim 兜底。
                     const sizeMap = { '竖图': '832x1216', '横图': '1216x832', '方图': '1024x1024' };
                     const body = {
                         model: request.searchParams.get('model') || '',
-                        prompt: request.searchParams.get('prompt') || '',
+                        prompt: (request.searchParams.get('prompt') || '').trim(),
                         size: sizeMap[request.searchParams.get('size')] || '1024x1024',
                         n: 1
                     };
                     const negative = request.searchParams.get('negative_prompt');
                     if (negative) body.negative_prompt = negative;
-                    const data = await fetchImageJobJson(`${request.origin}${request.pathname}`, {
+                    const data = await fetchImageJobJson(new URL(request.pathname, request.origin).href, {
                         method: 'POST',
                         headers: { 'content-type': 'application/json', 'Authorization': `Bearer ${task.token}` },
                         body: JSON.stringify(body)
                     });
                     const item = Array.isArray(data?.data) ? data.data[0] : null;
-                    const imageUrl = item?.url || (item?.b64_json ? `data:image/png;base64,${item.b64_json}` : '');
+                    // b64 优先：data URL 无二次请求风险（部分中转的 url 打不开或需鉴权）
+                    const imageUrl = (item?.b64_json ? `data:image/png;base64,${item.b64_json}` : '') || item?.url || '';
                     if (!imageUrl) throw new Error('生图渠道未返回图片');
                     const job = { status: 'done', id: `openai-${Date.now()}-${Math.random().toString(36).slice(2)}`, imageUrl };
                     publish(job);
                     return job;
                 }
-                let job = await fetchImageJobJson(`${task.baseUrl}/api/jobs`, {
+                let job = await fetchImageJobJson(new URL('/api/jobs', task.baseUrl).href, {
                     method: 'POST',
                     headers: { 'content-type': 'application/json' },
                     body: JSON.stringify(Object.fromEntries(request.searchParams.entries()))
@@ -2680,7 +2682,7 @@ const app = createApp({
                 while (!['done', 'failed'].includes(job.status)) {
                     await new Promise(resolve => setTimeout(resolve, 150));
                     try {
-                        job = await fetchImageJobJson(`${task.baseUrl}/api/jobs/${encodeURIComponent(job.id)}?token=${encodeURIComponent(task.token)}`);
+                        job = await fetchImageJobJson(new URL(`/api/jobs/${encodeURIComponent(job.id)}`, task.baseUrl).href + `?token=${encodeURIComponent(task.token)}`);
                         pollFailures = 0;
                     } catch (error) {
                         if (++pollFailures < 5) continue;
