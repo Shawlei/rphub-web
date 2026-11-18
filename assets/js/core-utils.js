@@ -953,6 +953,13 @@ window.RPHubUtils = {
         systemRegexNames: Object.freeze(['NAI画图正则']),
         systemWorldInfoNames: Object.freeze(['自动生图']),
         imageGenBaseUrl: 'https://nai.sta1n.cn',
+        imageGenProviders: Object.freeze([
+            Object.freeze({
+                id: 'sta1n',
+                name: 'STA1N 生图',
+                baseUrl: 'https://nai.sta1n.cn'
+            })
+        ]),
         defaultApiProviderId: 'deepseek',
         defaultApiConfig: Object.freeze({
             apiUrl: 'https://api.deepseek.com/v1',

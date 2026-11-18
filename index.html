@@ -1705,6 +1705,61 @@
                                             获取生图密钥
                                         </a>
                                     </div>
+                                    <!-- 生图渠道（预设 + 自定义） -->
+                                    <div class="mb-4">
+                                        <div class="mb-2 ml-1 flex items-center justify-between gap-3">
+                                            <label class="settings-label !mb-0">生图渠道</label>
+                                        </div>
+                                        <div class="relative mb-2 image-gen-provider-selector-container">
+                                            <button type="button" @click="showImageGenProviderSelector = !showImageGenProviderSelector"
+                                                class="settings-control flex items-center justify-between text-left">
+                                                <span class="min-w-0 flex-1">
+                                                    <span class="block text-sm font-bold text-gray-700 truncate">{{ selectedImageGenProvider.name }}</span>
+                                                    <span class="block text-xs text-gray-400 font-mono truncate">{{ selectedImageGenProvider.baseUrl || (isCustomImageGenProvider ? settings.imageGenBaseUrl : '') }}</span>
+                                                </span>
+                                                <svg class="w-4 h-4 text-gray-400 ml-2 shrink-0" fill="none"
+                                                    stroke="currentColor" viewBox="0 0 24 24">
+                                                    <path stroke-linecap="round" stroke-linejoin="round"
+                                                        stroke-width="2" d="M19 9l-7 7-7-7"></path>
+                                                </svg>
+                                            </button>
+                                            <div v-if="showImageGenProviderSelector"
+                                                class="absolute left-0 right-0 top-full z-40 mt-2 w-full max-h-80 overflow-y-auto bg-white border border-gray-200 rounded-xl shadow-xl p-2">
+                                                <button v-for="provider in imageGenProviders" :key="provider.id"
+                                                    type="button" @click="selectImageGenProvider(provider)"
+                                                    :class="['w-full px-3 py-2.5 rounded-lg flex items-center text-left transition-all', selectedImageGenProvider.id === provider.id ? 'bg-primary-50 text-primary-700' : 'hover:bg-gray-50 text-gray-700']">
+                                                    <span class="min-w-0 flex-1">
+                                                        <span class="block text-sm font-bold truncate">{{ provider.name }}</span>
+                                                        <span class="block text-xs text-gray-400 font-mono truncate">{{ provider.baseUrl }}</span>
+                                                    </span>
+                                                    <svg v-if="selectedImageGenProvider.id === provider.id"
+                                                        class="w-4 h-4 ml-2 text-primary-600 shrink-0" fill="none"
+                                                        stroke="currentColor" viewBox="0 0 24 24">
+                                                        <path stroke-linecap="round" stroke-linejoin="round"
+                                                            stroke-width="2" d="M5 13l4 4L19 7"></path>
+                                                    </svg>
+                                                </button>
+                                                <button type="button" @click="selectImageGenProvider(customImageGenProviderOption)"
+                                                    :class="['w-full mt-2 px-3 py-2.5 border-t border-gray-100 rounded-lg flex items-center justify-between text-left transition-all', isCustomImageGenProvider ? 'bg-primary-50 text-primary-700' : 'hover:bg-gray-50 text-gray-700']">
+                                                    <span class="block text-sm font-bold">自定义</span>
+                                                    <span class="block text-xs text-gray-400">手动输入生图地址</span>
+                                                </button>
+                                            </div>
+                                        </div>
+                                        <div v-if="isCustomImageGenProvider" class="relative">
+                                            <div
+                                                class="absolute left-4 top-1/2 -translate-y-1/2 text-gray-400 group-focus-within:text-primary-500 transition-colors pointer-events-none">
+                                                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                                        d="M3.055 11H5a2 2 0 012 2v1a2 2 0 002 2 2 2 0 012 2v2.945M8 3.935V5.5A2.5 2.5 0 0010.5 8h.5a2 2 0 012 2 2 2 0 104 0 2 2 0 012-2h1.064M15 20.488V18a2 2 0 012-2h3.064M21 12a9 9 0 11-18 0 9 9 0 0118 0z">
+                                                    </path>
+                                                </svg>
+                                            </div>
+                                            <input v-model="settings.customImageGenUrl" type="text"
+                                                class="settings-control settings-control--icon font-mono"
+                                                placeholder="https://your-image-api.example">
+                                        </div>
+                                    </div>
                                     <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
                                         <!-- Image Key -->
                                         <div
@@ -1719,11 +1774,30 @@
                                         <!-- Image Model -->
                                         <div class="min-w-0">
                                             <label
-                                                class="settings-label">生图版本</label>
-                                            <custom-select v-model="settings.imageModel" :options="imageModelOptions"
-                                                button-class="settings-control"
-                                                menu-class="text-sm">
-                                            </custom-select>
+                                                class="settings-label">生图模型</label>
+                                            <div class="flex items-center gap-2">
+                                                <button type="button" @click="openModelSelector('imageModel')"
+                                                    class="settings-control flex items-center justify-between text-left flex-1 min-w-0"
+                                                    :title="settings.imageModel">
+                                                    <span class="truncate mr-2 text-sm">{{ settings.imageModel || '请选择生图模型' }}</span>
+                                                    <svg class="w-5 h-5 text-gray-400 shrink-0" fill="none"
+                                                        stroke="currentColor" viewBox="0 0 24 24">
+                                                        <path stroke-linecap="round" stroke-linejoin="round"
+                                                            stroke-width="2" d="M9 5l7 7-7 7"></path>
+                                                    </svg>
+                                                </button>
+                                                <button type="button" @click="fetchImageGenModels(true)"
+                                                    :disabled="imageGenModelsLoading" title="刷新生图模型"
+                                                    class="settings-action shrink-0 text-primary-600">
+                                                    <svg class="w-5 h-5" :class="{ 'animate-spin': imageGenModelsLoading }"
+                                                        fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                        <path stroke-linecap="round" stroke-linejoin="round"
+                                                            stroke-width="2"
+                                                            d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15">
+                                                        </path>
+                                                    </svg>
+                                                </button>
+                                            </div>
                                         </div>
 
                                         <!-- Image Style -->

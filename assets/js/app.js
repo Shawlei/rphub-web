@@ -130,6 +130,7 @@ const {
     defaultApiConfig: DEFAULT_API_CONFIG,
     defaultApiProviderId: DEFAULT_API_PROVIDER_ID,
     imageGenBaseUrl: IMAGE_GEN_BASE_URL,
+    imageGenProviders,
     latestUpdate: latestUpdateConfig,
     systemRegexNames,
     systemWorldInfoNames,
@@ -311,7 +312,7 @@ const app = createApp({
                     quotaValue.value = 0;
                     return;
                 }
-                const baseUrl = IMAGE_GEN_BASE_URL;
+                const baseUrl = settings.imageGenBaseUrl || IMAGE_GEN_BASE_URL;
                 const response = await fetch(`${baseUrl}/api/api/getUser`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
@@ -357,6 +358,8 @@ const app = createApp({
         const activeModelTag = ref('all');
         const characterSearchQuery = ref('');
         const availableModels = ref([]);
+        const availableImageModels = ref([]);
+        const imageGenModelsLoading = ref(false);
         const toasts = ref([]);
         let toastIdSeed = 0;
         const chatContainer = ref(null);
@@ -595,6 +598,9 @@ const app = createApp({
             uiTemplateMainModelAnalysis: true,
             fontSize: window.innerWidth > 768 ? 16 : 14,
             imageGenKey: '',
+            imageGenProviderId: 'sta1n',
+            imageGenBaseUrl: IMAGE_GEN_BASE_URL,
+            customImageGenUrl: '',
             imageStyle: 'vertical',
             customImageArtists: '',
             imageModel: 'nai-diffusion-4-5-full',
@@ -701,6 +707,47 @@ const app = createApp({
         watch(() => settings.apiUrl, (newUrl) => {
             if (isCustomApiProviderId(settings.apiProviderId)) {
                 settings.customApiUrl = newUrl || '';
+            }
+        });
+
+        // ==== 生图渠道（预设 + 自定义渠道）====
+        const showImageGenProviderSelector = ref(false);
+        const customImageGenProviderOption = {
+            id: 'custom',
+            name: '自定义',
+            baseUrl: ''
+        };
+        const isCustomImageGenProviderId = (id) => id === 'custom';
+        const getImageGenProviderById = (id) => imageGenProviders.find(provider => provider.id === id);
+        const selectedImageGenProvider = computed(() => {
+            if (isCustomImageGenProviderId(settings.imageGenProviderId)) return customImageGenProviderOption;
+            return getImageGenProviderById(settings.imageGenProviderId) || customImageGenProviderOption;
+        });
+        const isCustomImageGenProvider = computed(() => isCustomImageGenProviderId(selectedImageGenProvider.value.id));
+        const selectImageGenProvider = (provider) => {
+            settings.imageGenProviderId = provider.id;
+            settings.imageGenBaseUrl = isCustomImageGenProviderId(provider.id)
+                ? settings.customImageGenUrl || ''
+                : provider.baseUrl;
+            showImageGenProviderSelector.value = false;
+        };
+        const normalizeImageGenProviderSettings = () => {
+            if (!isCustomImageGenProviderId(settings.imageGenProviderId) && !getImageGenProviderById(settings.imageGenProviderId)) {
+                settings.imageGenProviderId = 'sta1n';
+            }
+            if (isCustomImageGenProviderId(settings.imageGenProviderId)) {
+                settings.imageGenBaseUrl = settings.customImageGenUrl || settings.imageGenBaseUrl || IMAGE_GEN_BASE_URL;
+            } else {
+                const provider = getImageGenProviderById(settings.imageGenProviderId) || getImageGenProviderById('sta1n');
+                settings.imageGenProviderId = provider.id;
+                settings.imageGenBaseUrl = provider.baseUrl;
+            }
+        };
+        normalizeImageGenProviderSettings();
+
+        watch(() => settings.customImageGenUrl, (newUrl) => {
+            if (isCustomImageGenProviderId(settings.imageGenProviderId)) {
+                settings.imageGenBaseUrl = newUrl || '';
             }
         });
 
@@ -2276,9 +2323,10 @@ const app = createApp({
                 } else {
                     normalizeApiProviderSettings();
                 }
+                normalizeImageGenProviderSettings();
                 settings.fontSize = normalizeFontSize(settings.fontSize);
                 if (settings.reasoningEffort === 'xhigh') settings.reasoningEffort = 'max';
-                if (!imageModelOptions.some(option => option.value === settings.imageModel)) {
+                if (!settings.imageModel || typeof settings.imageModel !== 'string') {
                     settings.imageModel = imageModelOptions[0].value;
                 }
                 if (!imageSizeOptions.some(option => option.value === settings.imageSize)) {
@@ -3648,9 +3696,16 @@ const app = createApp({
         // Chat, summary and analysis models must write text, so embedding models are left out of their lists, and one
         // already saved as the summary or analysis model (picked earlier, or brought in with old settings) is cleared.
         const isEmbeddingModelId = id => /embedding/i.test(String(id || ''));
-        const selectableModels = computed(() => ['quickModels', 'memoryClassicModel', 'uiTemplateModel'].includes(modelSelectionTarget.value)
-            ? availableModels.value.filter(model => !isEmbeddingModelId(model.id))
-            : availableModels.value);
+        const imageModelSelectableOptions = computed(() => {
+            if (availableImageModels.value.length > 0) return availableImageModels.value;
+            return imageModelOptions.map(option => ({ id: option.value }));
+        });
+        const selectableModels = computed(() => {
+            if (modelSelectionTarget.value === 'imageModel') return imageModelSelectableOptions.value;
+            return ['quickModels', 'memoryClassicModel', 'uiTemplateModel'].includes(modelSelectionTarget.value)
+                ? availableModels.value.filter(model => !isEmbeddingModelId(model.id))
+                : availableModels.value;
+        });
         watch(() => [memorySettings.classicModel, settings.uiTemplateModel], ([classicModel, analysisModel]) => {
             if (isEmbeddingModelId(classicModel)) memorySettings.classicModel = '';
             if (isEmbeddingModelId(analysisModel)) settings.uiTemplateModel = '';
@@ -3959,6 +4014,34 @@ const app = createApp({
             }
         };
 
+        const fetchImageGenModels = async (isManual = false) => {
+            const baseUrl = String(settings.imageGenBaseUrl || '').trim().replace(/\/+$/, '');
+            if (!baseUrl) {
+                if (isManual) showToast('请先填写生图渠道地址', 'info');
+                return;
+            }
+            if (isManual) showToast('正在获取生图模型列表...', 'info');
+            imageGenModelsLoading.value = true;
+            try {
+                const response = await fetch(`${baseUrl}/models`, { method: 'GET' });
+                const data = await response.json();
+                const rawList = Array.isArray(data)
+                    ? data
+                    : (Array.isArray(data?.data) ? data.data : (Array.isArray(data?.models) ? data.models : null));
+                if (!Array.isArray(rawList) || !rawList.length) throw new Error('该渠道未返回可用生图模型');
+                availableImageModels.value = rawList
+                    .map(item => ({ id: String(typeof item === 'object' && item ? (item.id || item.name || '') : (item || '')) }))
+                    .filter(model => model.id);
+                if (!availableImageModels.value.length) throw new Error('该渠道未返回可用生图模型');
+                if (isManual) showToast(`成功获取 ${availableImageModels.value.length} 个生图模型`, 'success');
+            } catch (error) {
+                availableImageModels.value = [];
+                if (isManual) showToast('获取生图模型失败: ' + (error.message || error), 'error');
+            } finally {
+                imageGenModelsLoading.value = false;
+            }
+        };
+
         const openModelSelector = (target) => {
             modelSelectionTarget.value = target;
             if (target === 'memoryEmbeddingModel') {
@@ -4040,7 +4123,7 @@ const app = createApp({
 
         const checkImageGenStatus = async () => {
             await checkConnectionStatus(imageGenStatus, imageGenLatency, 'Image API', signal => (
-                fetch(IMAGE_GEN_BASE_URL, {
+                fetch(settings.imageGenBaseUrl || IMAGE_GEN_BASE_URL, {
                     method: 'HEAD',
                     mode: 'no-cors',
                     signal
@@ -7335,7 +7418,7 @@ const app = createApp({
 
         const enforceSpecialRules = () => {
             const imageGenToken = settings.imageGenKey.trim();
-            const baseUrl = IMAGE_GEN_BASE_URL;
+            const baseUrl = (settings.imageGenBaseUrl || IMAGE_GEN_BASE_URL).replace(/\/+$/, '');
 
             // 1. NAI画图正则 (统一版本)
             const imageGenRegexName = 'NAI画图正则';
@@ -7394,6 +7477,15 @@ const app = createApp({
         };
 
         watch(() => settings.imageGenKey, () => {
+            enforceSpecialRules();
+            if (isAutoImageGenEnabled.value) {
+                updateImageGenRegexState({ enableRegex: true });
+            }
+            saveData();
+            fetchQuota();
+        });
+
+        watch(() => settings.imageGenBaseUrl, () => {
             enforceSpecialRules();
             if (isAutoImageGenEnabled.value) {
                 updateImageGenRegexState({ enableRegex: true });
@@ -8676,6 +8768,9 @@ const app = createApp({
                 if (showApiProviderSelector.value && !e.target.closest('.api-provider-selector-container')) {
                     showApiProviderSelector.value = false;
                 }
+                if (showImageGenProviderSelector.value && !e.target.closest('.image-gen-provider-selector-container')) {
+                    showImageGenProviderSelector.value = false;
+                }
             });
         });
 
@@ -8939,7 +9034,7 @@ const app = createApp({
             updateModalRef, latestUpdateConfig, latestUpdateDisplay,
             showConfirmModal, confirmMessage, modelMode, isGeminiModel, isTruncationEnabled, isPresetEnabled, chatModelSlots, selectChatModelSlot, reasoningEffortSlider, reasoningEffortLabel, // Export for template
             isGenerating, isReceiving, isThinking, hasActiveToolInlineWork, isConversationBusy, activeToolContinuationMessageId, activeToolContinuationHasResponse, userInput, pendingCardInteraction, clearPendingCardInteraction, pendingChatImages, pendingChatImageReadCount, requestChatImageSelection, handleChatImageSelection, removePendingChatImage, modelSearchQuery, activeModelTag, modelTags, characterSearchQuery, filteredModels, filteredCharacters,
-            user, settings, apiProviderOptions, selectedApiProvider, isCustomApiProvider, customApiProviderOptions, showApiProviderSelector, selectApiProvider, characters, currentCharacter, currentCharacterAvatar, currentCharacterIndex, switchingCharacterIndex, chatHistory, displayedChatMessages, handleChatScroll, presets, presetRoleOptions, fontSizeOptions, availableImageStyleOptions, imageModelOptions, imageSizeOptions, imageGenCountOptions, scopeOptions, uiTemplatePlacementOptions, worldInfoPositionOptions, getPresetRoleLabel, getPresetRoleDisplayLabel, getPresetRoleBadgeClass, getSortableItemKey, regexScripts, worldInfo,
+            user, settings, apiProviderOptions, selectedApiProvider, isCustomApiProvider, customApiProviderOptions, showApiProviderSelector, selectApiProvider, imageGenProviders, selectedImageGenProvider, isCustomImageGenProvider, customImageGenProviderOption, showImageGenProviderSelector, selectImageGenProvider, fetchImageGenModels, imageGenModelsLoading, characters, currentCharacter, currentCharacterAvatar, currentCharacterIndex, switchingCharacterIndex, chatHistory, displayedChatMessages, handleChatScroll, presets, presetRoleOptions, fontSizeOptions, availableImageStyleOptions, imageModelOptions, imageSizeOptions, imageGenCountOptions, scopeOptions, uiTemplatePlacementOptions, worldInfoPositionOptions, getPresetRoleLabel, getPresetRoleDisplayLabel, getPresetRoleBadgeClass, getSortableItemKey, regexScripts, worldInfo,
             activeTools, activeToolAggressivenessOptions: ACTIVE_TOOL_AGGRESSIVENESS_OPTIONS, editingActiveTool, normalizeActiveTools, isWebActiveTool, getActiveToolDisplayDescription, getActiveToolResultCountMin, getActiveToolResultCountMax,
             getToolCallModeText, hasThinkingOrTools, isMessageThinkingOrRunning, isThinkingSummaryOpen, toggleThinkingSummary, markThinkingSummaryDetailOpened, getTimelineSteps,
             isStyleFilterDetailsOpen, toggleStyleFilterDetails, getStyleFilterHitSegments,
