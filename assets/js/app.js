@@ -4045,7 +4045,10 @@ const app = createApp({
             try {
                 // 生图渠道（NAI 中转 / OpenAI 兼容）统一走 /v1/models，自动补齐 /v1 前缀
                 const url = buildApiEndpoint(settings.imageGenBaseUrl, 'models');
-                const response = await fetch(url, { method: 'GET' });
+                const imageGenToken = String(settings.imageGenKey || '').trim();
+                const headers = {};
+                if (imageGenToken) headers['Authorization'] = `Bearer ${imageGenToken}`;
+                const response = await fetch(url, { method: 'GET', headers });
                 if (!response.ok) throw new Error(`HTTP ${response.status}`);
                 const data = await response.json();
                 const rawList = Array.isArray(data)
