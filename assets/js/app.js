@@ -2612,9 +2612,9 @@ const app = createApp({
             }
 
             const imageUrl = job.imageUrl
-                ? new URL(job.imageUrl, request.origin || task.baseUrl).href
+                ? new URL(job.imageUrl, task.baseUrl).href
                 : job.id
-                    ? new URL(`/api/jobs/${encodeURIComponent(job.id)}/content`, request.origin || task.baseUrl).href + `?token=${encodeURIComponent(task.token)}`
+                    ? new URL(`/api/jobs/${encodeURIComponent(job.id)}/content`, task.baseUrl).href + `?token=${encodeURIComponent(task.token)}`
                     : '';
             if (!imageUrl) {
                 card.classList.remove('is-generating');
