@@ -9118,6 +9118,175 @@ const app = createApp({
             }
         };
 
+        // ==== 插件扩展（C17）：导入 / 导出 / 启用 / 最小宿主 ====
+        // 插件包格式：{ format:'rphub-plugin', version:1, id, name, version, author, description, hooks, code }
+        // 全部导出时用 { format:'rphub-plugins-bundle', plugins:[...] }。导入两种都认。
+        const PLUGIN_STORAGE_KEY = 'plugins';
+        const PLUGIN_FORMAT = 'rphub-plugin';
+        const PLUGIN_BUNDLE_FORMAT = 'rphub-plugins-bundle';
+        const PLUGIN_HOOKS = Object.freeze(['appReady']);
+        const plugins = ref([]);
+        const pluginRuntimeErrors = reactive({});
+
+        const makePluginId = () => `plugin-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+        const normalizePluginRecord = (raw, index = 0) => {
+            const source = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
+            const hooks = Array.isArray(source.hooks)
+                ? [...new Set(source.hooks.filter(hook => PLUGIN_HOOKS.includes(hook)))]
+                : [];
+            return {
+                id: /^[A-Za-z0-9_.-]{3,64}$/.test(String(source.id || '')) ? String(source.id) : makePluginId(),
+                name: String(source.name || source.title || `未命名插件 ${index + 1}`).trim().slice(0, 80),
+                version: String(source.version || '1.0.0').slice(0, 20),
+                author: String(source.author || '').slice(0, 60),
+                description: String(source.description || source.desc || '').slice(0, 400),
+                hooks: hooks.length ? hooks : ['appReady'],
+                code: typeof source.code === 'string' ? source.code : '',
+                enabled: source.enabled === true,
+                createdAt: String(source.createdAt || new Date().toISOString())
+            };
+        };
+
+        const savePlugins = async () => {
+            await setStoredValue(PLUGIN_STORAGE_KEY, JSON.parse(JSON.stringify(plugins.value)));
+        };
+
+        const loadPlugins = async () => {
+            const saved = await getStoredValue(PLUGIN_STORAGE_KEY);
+            if (Array.isArray(saved) && saved.length) {
+                plugins.value = saved.map((item, index) => normalizePluginRecord(item, index));
+            }
+        };
+
+        // 最小宿主：插件代码等于一段页面脚本，能拿到的只有 api 这一个入参。
+        // 出错只记录、不抛给主流程；页面脚本无法真正卸载，禁用要刷新才彻底生效。
+        const runPlugin = (plugin) => {
+            if (!plugin || !plugin.code.trim()) {
+                pluginRuntimeErrors[plugin.id] = '插件没有可执行代码';
+                return false;
+            }
+            try {
+                const api = {
+                    id: plugin.id,
+                    name: plugin.name,
+                    version: plugin.version,
+                    hooks: plugin.hooks,
+                    log: (...args) => console.log(`[plugin:${plugin.id}]`, ...args),
+                    toast: (message, type) => showToast(String(message || ''), type || 'info'),
+                    storage: {
+                        get: (key) => getStoredValue(`plugin:${plugin.id}:${key}`),
+                        set: (key, value) => setStoredValue(`plugin:${plugin.id}:${key}`, value)
+                    },
+                    utils: window.RPHubUtils
+                };
+                // eslint-disable-next-line no-new-func
+                new Function('api', `"use strict";\n${plugin.code}\n`)(api);
+                delete pluginRuntimeErrors[plugin.id];
+                return true;
+            } catch (error) {
+                pluginRuntimeErrors[plugin.id] = error?.message || String(error);
+                console.warn(`[plugin:${plugin.id}] 运行失败`, error);
+                return false;
+            }
+        };
+
+        const bootPlugins = () => {
+            plugins.value.filter(plugin => plugin.enabled).forEach(plugin => runPlugin(plugin));
+        };
+
+        const togglePlugin = async (plugin) => {
+            plugin.enabled = !plugin.enabled;
+            await savePlugins();
+            if (plugin.enabled) {
+                const ok = runPlugin(plugin);
+                showToast(ok ? `已启用「${plugin.name}」` : `「${plugin.name}」运行出错，见列表提示`, ok ? 'success' : 'error');
+            } else {
+                delete pluginRuntimeErrors[plugin.id];
+                showToast(`已禁用「${plugin.name}」，刷新后完全卸载`, 'info');
+            }
+        };
+
+        const importPluginPayload = (data) => {
+            const isBundle = data && typeof data === 'object' && (data.format === PLUGIN_BUNDLE_FORMAT || Array.isArray(data.plugins));
+            const list = isBundle ? data.plugins : (Array.isArray(data) ? data : [data]);
+            const items = (Array.isArray(list) ? list : []).filter(item => item && typeof item === 'object');
+            if (!items.length) throw new Error('没有可识别的插件');
+            const usedIds = new Set(plugins.value.map(plugin => plugin.id));
+            const incoming = items.map((item, index) => {
+                const record = normalizePluginRecord(item, index);
+                if (usedIds.has(record.id)) record.id = makePluginId();
+                usedIds.add(record.id);
+                return record;
+            });
+            plugins.value = plugins.value.concat(incoming);
+            return incoming.length;
+        };
+
+        const importPlugins = (event) => readJsonFileInput(event, async (data) => {
+            const count = importPluginPayload(data);
+            await savePlugins();
+            showToast(`成功导入 ${count} 个插件，默认未启用`, 'success');
+        }, error => showToast(`导入失败: ${error.message}`, 'error'));
+
+        const exportPlugin = (plugin) => {
+            const payload = {
+                format: PLUGIN_FORMAT,
+                version: 1,
+                id: plugin.id,
+                name: plugin.name,
+                version: plugin.version,
+                author: plugin.author,
+                description: plugin.description,
+                hooks: plugin.hooks,
+                code: plugin.code
+            };
+            const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+            cardUtils.downloadBlob(blob, `${plugin.id}.json`);
+            showToast(`已导出「${plugin.name}」`, 'success');
+        };
+
+        const exportAllPlugins = () => {
+            if (!plugins.value.length) {
+                showToast('没有可导出的插件', 'warning');
+                return;
+            }
+            const payload = {
+                format: PLUGIN_BUNDLE_FORMAT,
+                version: 1,
+                exportedAt: new Date().toISOString(),
+                plugins: plugins.value.map(plugin => ({
+                    id: plugin.id,
+                    name: plugin.name,
+                    version: plugin.version,
+                    author: plugin.author,
+                    description: plugin.description,
+                    hooks: plugin.hooks,
+                    code: plugin.code
+                }))
+            };
+            const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+            cardUtils.downloadBlob(blob, `rphub-plugins-${Date.now()}.json`);
+            showToast(`已导出 ${plugins.value.length} 个插件`, 'success');
+        };
+
+        const removePlugin = async (plugin) => {
+            plugins.value = plugins.value.filter(item => item.id !== plugin.id);
+            delete pluginRuntimeErrors[plugin.id];
+            await savePlugins();
+            showToast(`已删除「${plugin.name}」`, 'info');
+        };
+
+        // DB 就绪后加载并启动，失败不阻塞主流程
+        Promise.resolve().then(async () => {
+            try {
+                await initDB();
+                await loadPlugins();
+                bootPlugins();
+            } catch (error) {
+                console.warn('插件初始化失败', error);
+            }
+        });
+
         const applyPersonPresetSelection = (person) => {
             user.person = person === 'third' ? 'third' : 'second';
             const secondPersonPreset = presets.value.find(preset => preset.name === '第二人称');
@@ -9128,7 +9297,8 @@ const app = createApp({
 
         return {
             upstreamSync,
-            imageGallery, galleryFilterChar, galleryPreviewSrc, showGalleryPreview, galleryCacheStats,
+            imageGallery, galleryFilterChar,
+            plugins, pluginRuntimeErrors, importPlugins, exportPlugin, exportAllPlugins, removePlugin, togglePlugin, galleryPreviewSrc, showGalleryPreview, galleryCacheStats,
             getGalleryItemDisplaySrc, openGallery, openGalleryPreview, closeGalleryPreview, confirmGalleryImageSave,
             galleryCharacters, galleryAlbums, openAlbum, filteredGallery, galleryDateSections, visibleGalleryItems, handleGalleryScroll,
             albumSelectionMode, albumSelected, gallerySelectionMode, gallerySelected,

@@ -2143,6 +2143,76 @@
             </div>
 
             <!-- Tools View -->
+            <!-- Plugins View -->
+            <div v-if="currentView === 'plugins'" class="management-view">
+                <settings-page-header title="插件" @menu="toggleNavigation">
+                    <template #icon>
+                        <svg class="w-6 h-6 md:w-7 md:h-7 mr-2 text-primary-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 4a2 2 0 114 0v1a1 1 0 001 1h3a1 1 0 011 1v3a1 1 0 01-1 1h-1a2 2 0 100 4h1a1 1 0 011 1v3a1 1 0 01-1 1h-3a1 1 0 01-1-1v-1a2 2 0 10-4 0v1a1 1 0 01-1 1H7a1 1 0 01-1-1v-3a1 1 0 00-1-1H4a2 2 0 110-4h1a1 1 0 001-1V7a1 1 0 011-1h3a1 1 0 001-1V4z"></path>
+                        </svg>
+                    </template>
+                    <button @click="exportAllPlugins" class="settings-icon-button" title="导出全部插件">
+                        <svg class="w-5 h-5" fill="none" stroke="currentColor"><use href="#icon-export"></use></svg>
+                    </button>
+                    <label class="settings-icon-button cursor-pointer" title="导入插件">
+                        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><use href="#icon-import"></use></svg>
+                        <input type="file" accept=".json,application/json" @change="importPlugins" class="hidden">
+                    </label>
+                </settings-page-header>
+
+                <div class="text-[13px] leading-relaxed text-gray-500 px-1 mb-3">
+                    插件是本页里执行的脚本，等同你亲手信任的代码。导入后默认不启用，打开开关立即运行；关闭后刷新页面才算完全卸载。
+                </div>
+
+                <div v-if="!plugins.length"
+                    class="bg-white/70 backdrop-blur-sm rounded-2xl border border-gray-200 border-dashed shadow-sm px-6 py-10 text-center">
+                    <svg class="w-10 h-10 mx-auto mb-3 text-gray-300" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.6" d="M11 4a2 2 0 114 0v1a1 1 0 001 1h3a1 1 0 011 1v3a1 1 0 01-1 1h-1a2 2 0 100 4h1a1 1 0 011 1v3a1 1 0 01-1 1h-3a1 1 0 01-1-1v-1a2 2 0 10-4 0v1a1 1 0 01-1 1H7a1 1 0 01-1-1v-3a1 1 0 00-1-1H4a2 2 0 110-4h1a1 1 0 001-1V7a1 1 0 011-1h3a1 1 0 001-1V4z"></path>
+                    </svg>
+                    <p class="text-sm font-semibold text-gray-600">还没有插件</p>
+                    <p class="mt-1 text-xs text-gray-400">点右上角的导入按钮，选一个 .json 插件包（单个插件或整包都行）</p>
+                </div>
+
+                <div v-else id="plugin-list" class="sortable-list">
+                    <div v-for="plugin in plugins" :key="plugin.id" class="sortable-list-item group"
+                        :class="{ 'is-off': !plugin.enabled }">
+                        <div class="sortable-item-main">
+                            <div class="min-w-0">
+                                <div class="sortable-item-heading">
+                                    <h3 class="truncate">{{ plugin.name }}</h3>
+                                    <span class="meta-badge meta-badge--desktop meta-badge--global">v{{ plugin.version }}</span>
+                                </div>
+                                <div class="mt-1 text-[11px] text-gray-400 truncate">
+                                    {{ plugin.id }}<span v-if="plugin.author"> · {{ plugin.author }}</span>
+                                </div>
+                                <p v-if="plugin.description" class="mt-1 text-xs text-gray-500 truncate">{{ plugin.description }}</p>
+                                <p v-if="pluginRuntimeErrors[plugin.id]" class="mt-1 text-xs text-red-500 truncate">
+                                    运行错误：{{ pluginRuntimeErrors[plugin.id] }}
+                                </p>
+                            </div>
+                        </div>
+                        <div class="sortable-item-actions">
+                            <label class="relative inline-flex items-center cursor-pointer">
+                                <input type="checkbox" :checked="plugin.enabled" @change="togglePlugin(plugin)"
+                                    class="settings-toggle-input sr-only">
+                                <div class="settings-toggle"></div>
+                            </label>
+                            <div class="sortable-item-buttons">
+                                <button @click="exportPlugin(plugin)" class="item-action-button item-action-button--edit" title="导出">
+                                    <svg class="w-5 h-5" fill="none" stroke="currentColor"><use href="#icon-export"></use></svg>
+                                </button>
+                                <button @click="removePlugin(plugin)" class="item-action-button item-action-button--delete" title="删除">
+                                    <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                            d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path>
+                                    </svg>
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
             <div v-if="currentView === 'tools'" class="management-view">
                 <settings-page-header title="工具" @menu="toggleNavigation">
                     <template #icon>
