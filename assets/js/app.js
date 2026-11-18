@@ -725,6 +725,8 @@ const app = createApp({
             return getImageGenProviderById(settings.imageGenProviderId) || customImageGenProviderOption;
         });
         const isCustomImageGenProvider = computed(() => isCustomImageGenProviderId(selectedImageGenProvider.value.id));
+        // 生图协议：预设 STA1N 走 /generate + /api/jobs（异步）；自定义渠道按 OpenAI 兼容走 /v1/images/generations（同步）
+        const currentImageGenProtocol = computed(() => isCustomImageGenProvider.value ? 'openai' : 'sta1n');
         const syncCurrentImageGenKeyToProvider = () => {
             const providerId = settings.imageGenProviderId;
             settings.imageGenKeys[providerId] = settings.imageGenKey || '';
@@ -2543,7 +2545,14 @@ const app = createApp({
             const text = await response.text();
             let payload = {};
             try { payload = text ? JSON.parse(text) : {}; } catch { /* 交给下方统一报错 */ }
-            if (!response.ok) throw new Error(payload.error || text || `HTTP ${response.status}`);
+            if (!response.ok) {
+                const err = payload?.error;
+                let message;
+                if (typeof err === 'string') message = err;
+                else if (err && typeof err === 'object') message = err.message || err.detail || err.code || stringifyErrorDetail(err);
+                else message = payload?.message || text || `HTTP ${response.status}`;
+                throw new Error(message);
+            }
             return payload;
         };
 
@@ -2636,7 +2645,31 @@ const app = createApp({
                 task.job = job;
                 [...task.cards].forEach(card => renderGeneratedImageJob(card, task, job));
             };
+            const isOpenAI = request.pathname.includes('/images/generations');
             task.promise = (async () => {
+                if (isOpenAI) {
+                    // OpenAI 兼容生图：同步 POST /images/generations，直接返回图片 URL
+                    const sizeMap = { '竖图': '832x1216', '横图': '1216x832', '方图': '1024x1024' };
+                    const body = {
+                        model: request.searchParams.get('model') || '',
+                        prompt: request.searchParams.get('prompt') || '',
+                        size: sizeMap[request.searchParams.get('size')] || '1024x1024',
+                        n: 1
+                    };
+                    const negative = request.searchParams.get('negative_prompt');
+                    if (negative) body.negative_prompt = negative;
+                    const data = await fetchImageJobJson(`${request.origin}${request.pathname}`, {
+                        method: 'POST',
+                        headers: { 'content-type': 'application/json', 'Authorization': `Bearer ${task.token}` },
+                        body: JSON.stringify(body)
+                    });
+                    const item = Array.isArray(data?.data) ? data.data[0] : null;
+                    const imageUrl = item?.url || (item?.b64_json ? `data:image/png;base64,${item.b64_json}` : '');
+                    if (!imageUrl) throw new Error('生图渠道未返回图片');
+                    const job = { status: 'done', id: `openai-${Date.now()}-${Math.random().toString(36).slice(2)}`, imageUrl };
+                    publish(job);
+                    return job;
+                }
                 let job = await fetchImageJobJson(`${task.baseUrl}/api/jobs`, {
                     method: 'POST',
                     headers: { 'content-type': 'application/json' },
@@ -2773,7 +2806,11 @@ const app = createApp({
             const sourceUrl = card.dataset.imageRequest || card.querySelector('img')?.getAttribute('src');
             if (!sourceUrl) return;
             const nextImageUrl = new URL(sourceUrl, window.location.href);
-            nextImageUrl.searchParams.set('tag', tags.join(', '));
+            if (nextImageUrl.pathname.includes('/images/generations')) {
+                nextImageUrl.searchParams.set('prompt', tags.join(', '));
+            } else {
+                nextImageUrl.searchParams.set('tag', tags.join(', '));
+            }
             nextImageUrl.searchParams.set('nocache', '1');
 
             const originalContent = message.content;
@@ -7451,7 +7488,13 @@ const app = createApp({
             const targetArtists = cardUtils.getImageStyleArtists(settings.imageStyle, settings.customImageArtists);
 
             const encodedTargetArtists = encodeURIComponent(targetArtists);
-            const imageRequestUrl = `${baseUrl}/generate?tag=$1&token=${encodeURIComponent(imageGenToken)}&model=${settings.imageModel}&artist=${encodedTargetArtists}&size=${settings.imageSize}&steps=40&scale=6&cfg=0&sampler=k_dpmpp_2m_sde&negative={{{{bad anatomy}}}},{bad feet},bad hands,{{{bad proportions}}},{blurry},cloned face,cropped,{{{deformed}}},{{{disfigured}}},error,{{{extra arms}}},{extra digit},{{{extra legs}}},extra limbs,{{extra limbs}},{fewer digits},{{{fused fingers}}},gross proportions,ink eyes,ink hair,jpeg artifacts,{{{{long neck}}}},low quality,{malformed limbs},{{missing arms}},{missing fingers}},{{missing legs}},{{{more than 2 nipples}}},mutated hands,{{{mutation}}},normal quality,owres,{{poorly drawn face}},{{poorly drawn hands}},reen eyes,signature,text,{{too many fingers}},{{{ugly}}},username,uta,watermark,worst quality,{{{more than 2 legs}}},awkward hand sign,weird hand gesture,contorted hand,unnatural finger pose,deformed hand gesture,{shaka},{hang loose},{{rock on}},{shaka sign}&nocache=0&noise_schedule=karras`;
+            const imageGenNegative = `{{{{bad anatomy}}}},{bad feet},bad hands,{{{bad proportions}}},{blurry},cloned face,cropped,{{{deformed}}},{{{disfigured}}},error,{{{extra arms}}},{extra digit},{{{extra legs}}},extra limbs,{{extra limbs}},{fewer digits},{{{fused fingers}}},gross proportions,ink eyes,ink hair,jpeg artifacts,{{{{long neck}}}},low quality,{malformed limbs},{{missing arms}},{missing fingers}},{{missing legs}},{{{more than 2 nipples}}},mutated hands,{{{mutation}}},normal quality,owres,{{poorly drawn face}},{{poorly drawn hands}},reen eyes,signature,text,{{too many fingers}},{{{ugly}}},username,uta,watermark,worst quality,{{{more than 2 legs}}},awkward hand sign,weird hand gesture,contorted hand,unnatural finger pose,deformed hand gesture,{shaka},{hang loose},{{rock on}},{shaka sign}`;
+            let imageRequestUrl;
+            if (currentImageGenProtocol.value === 'openai') {
+                imageRequestUrl = `${buildApiEndpoint(baseUrl, 'images/generations')}?prompt=$1&model=${encodeURIComponent(settings.imageModel)}&size=${settings.imageSize}&negative_prompt=${encodeURIComponent(imageGenNegative)}&token=${encodeURIComponent(imageGenToken)}&nocache=0`;
+            } else {
+                imageRequestUrl = `${baseUrl}/generate?tag=$1&token=${encodeURIComponent(imageGenToken)}&model=${settings.imageModel}&artist=${encodedTargetArtists}&size=${settings.imageSize}&steps=40&scale=6&cfg=0&sampler=k_dpmpp_2m_sde&negative=${imageGenNegative}&nocache=0&noise_schedule=karras`;
+            }
             const imageGenRegexContent = {
                 name: imageGenRegexName,
                 regex: getImageTagRegex().toString(),
