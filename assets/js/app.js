@@ -123,6 +123,23 @@ const {
     setStoredValue,
     unwrapForStorage
 } = window.RPHubStorage;
+// 插件宿主的消息钩子注册表（C17）。插件启用后往里注册，渲染/发送时按序调用。
+// 放模块作用域是为了让 processRegex / sendMessage 能在 setup 早期就引用到，避免 TDZ。
+const pluginMessageHooks = { renderMessage: [], beforeSend: [] };
+const applyPluginHooks = (name, value, context) => {
+    const handlers = pluginMessageHooks[name];
+    if (!handlers || !handlers.length) return value;
+    let result = value;
+    for (const handler of handlers) {
+        try {
+            const next = handler(result, context);
+            if (typeof next === 'string') result = next;
+        } catch (error) {
+            console.warn(`[plugin] ${name} 钩子执行失败`, error);
+        }
+    }
+    return result;
+};
 const { prompts: BUILTIN_PROMPTS } = window.RPHubBuiltinContent;
 const {
     activeTools: activeToolConfig,
@@ -4030,7 +4047,9 @@ const app = createApp({
                     console.error(`Regex error in script "${script.name || 'Unnamed'}":`, e.message);
                 }
             });
-            return role === 'assistant' ? filterBlockedStyleText(result) : result;
+            const displayText = role === 'assistant' ? filterBlockedStyleText(result) : result;
+            // 显示层插件钩子（C17）：只改渲染出来的正文，不动原始记录。
+            return isDisplay ? applyPluginHooks('renderMessage', displayText, { role }) : displayText;
         };
         // 记忆编号对应的轮次（单轮 3，合并总结 1-5），正文角标和判断依据弹窗都显示轮次。
         const memoryCitationLabels = computed(() => new Map(flattenClassicMemories(classicMemories.value)
@@ -4412,7 +4431,7 @@ const app = createApp({
                     id: generateUUID(),
                     role: 'user',
                     name: user.name,
-                    content: finalContent,
+                    content: applyPluginHooks('beforeSend', finalContent, { role: 'user' }),
                     shouldAnimate: true,
                     skipReveal: true,
                     isSelf: true,
@@ -9124,7 +9143,7 @@ const app = createApp({
         const PLUGIN_STORAGE_KEY = 'plugins';
         const PLUGIN_FORMAT = 'rphub-plugin';
         const PLUGIN_BUNDLE_FORMAT = 'rphub-plugins-bundle';
-        const PLUGIN_HOOKS = Object.freeze(['appReady']);
+        const PLUGIN_HOOKS = Object.freeze(['appReady', 'renderMessage', 'beforeSend']);
         const plugins = ref([]);
         const pluginRuntimeErrors = reactive({});
 
@@ -9177,7 +9196,30 @@ const app = createApp({
                         get: (key) => getStoredValue(`plugin:${plugin.id}:${key}`),
                         set: (key, value) => setStoredValue(`plugin:${plugin.id}:${key}`, value)
                     },
-                    utils: window.RPHubUtils
+                    utils: window.RPHubUtils,
+                    // 注册事件钩子：renderMessage（改显示正文）、beforeSend（改发出的用户消息）。
+                    on: (hook, handler) => {
+                        if (typeof handler !== 'function') return false;
+                        if (hook === 'appReady') { try { handler(); } catch (error) { console.warn('[plugin] appReady 失败', error); } return true; }
+                        if (!pluginMessageHooks[hook]) return false;
+                        pluginMessageHooks[hook].push(handler);
+                        return true;
+                    },
+                    off: (hook, handler) => {
+                        const list = pluginMessageHooks[hook];
+                        if (!list) return false;
+                        const index = list.indexOf(handler);
+                        if (index >= 0) list.splice(index, 1);
+                        return index >= 0;
+                    },
+                    // 注入一段全局 CSS，返回移除函数
+                    style: (css) => {
+                        const node = document.createElement('style');
+                        node.dataset.pluginStyle = plugin.id;
+                        node.textContent = String(css || '');
+                        document.head.appendChild(node);
+                        return () => node.remove();
+                    }
                 };
                 // eslint-disable-next-line no-new-func
                 new Function('api', `"use strict";\n${plugin.code}\n`)(api);

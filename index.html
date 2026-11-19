@@ -2161,8 +2161,23 @@
                 </settings-page-header>
 
                 <div class="text-[13px] leading-relaxed text-gray-500 px-1 mb-3">
-                    插件是本页里执行的脚本，等同你亲手信任的代码。导入后默认不启用，打开开关立即运行；关闭后刷新页面才算完全卸载。
+                    插件是本页里执行的脚本，等同你亲手信任的代码。导入后默认不启用，打开开关立即运行；关闭开关只是停止注册新钩子，刷新页面才算完全卸载。
                 </div>
+
+                <details class="mb-3 rounded-2xl border border-gray-200 bg-white/70 overflow-hidden">
+                    <summary class="px-4 py-3 text-sm font-semibold text-gray-700 cursor-pointer select-none">插件能用什么</summary>
+                    <div class="px-4 pb-4 text-[12px] leading-relaxed text-gray-500">
+                        <p class="mb-2">代码体里拿到一个 <code class="px-1 rounded bg-gray-100">api</code> 入参：</p>
+                        <pre class="whitespace-pre-wrap break-all bg-gray-50 rounded-lg p-3 text-[11px] text-gray-600 mb-2">api.log(...)                     控制台
+api.toast(msg, type)            页面提示
+api.storage.get(key) / .set(k,v)  按插件隔离的存储
+api.style(css)                  注入全局样式，返回移除函数
+api.on('renderMessage', fn)     改显示正文，fn(text,{role}) 返回新文本
+api.on('beforeSend', fn)        改发出的用户消息
+api.utils                       RPHubUtils 全套工具</pre>
+                        <p>钩子按注册顺序串联，抛错只记日志不会中断页面。</p>
+                    </div>
+                </details>
 
                 <div v-if="!plugins.length"
                     class="bg-white/70 backdrop-blur-sm rounded-2xl border border-gray-200 border-dashed shadow-sm px-6 py-10 text-center">
