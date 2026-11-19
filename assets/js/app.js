@@ -9327,6 +9327,12 @@ const app = createApp({
             showToast(`已导出 ${plugins.value.length} 个插件`, 'success');
         };
 
+        // 页内刷新：等同重启 App 的页面侧，插件重新装载、样式重新注入，不用退出软件。
+        const reloadApp = () => {
+            try { showToast('正在刷新…', 'info'); } catch (e) { }
+            setTimeout(() => { try { location.reload(); } catch (e) { console.warn('reload 失败', e); } }, 80);
+        };
+
         const removePlugin = async (plugin) => {
             plugins.value = plugins.value.filter(item => item.id !== plugin.id);
             delete pluginRuntimeErrors[plugin.id];
@@ -9357,7 +9363,7 @@ const app = createApp({
             upstreamSync,
             imageGallery, galleryFilterChar,
             pluginHostVersion: PLUGIN_HOST_VERSION,
-            expandedPluginIds, togglePluginDetails,
+            expandedPluginIds, togglePluginDetails, reloadApp,
             plugins, pluginRuntimeErrors, importPlugins, exportPlugin, exportAllPlugins, removePlugin, togglePlugin, galleryPreviewSrc, showGalleryPreview, galleryCacheStats,
             getGalleryItemDisplaySrc, openGallery, openGalleryPreview, closeGalleryPreview, confirmGalleryImageSave,
             galleryCharacters, galleryAlbums, openAlbum, filteredGallery, galleryDateSections, visibleGalleryItems, handleGalleryScroll,
