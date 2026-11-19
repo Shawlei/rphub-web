@@ -2192,8 +2192,10 @@ api.utils                       RPHubUtils 全套工具</pre>
                 <div v-else id="plugin-list" class="sortable-list">
                     <div v-for="plugin in plugins" :key="plugin.id" class="sortable-list-item group"
                         :class="{ 'is-off': !plugin.enabled }">
-                        <div class="sortable-item-main">
-                            <div class="min-w-0">
+                        <div class="sortable-item-main cursor-pointer select-none"
+                            @click="togglePluginDetails(plugin)"
+                            :aria-expanded="expandedPluginIds[plugin.id] ? 'true' : 'false'">
+                            <div class="min-w-0 flex-1">
                                 <div class="sortable-item-heading">
                                     <h3 class="truncate">{{ plugin.name }}</h3>
                                     <span class="meta-badge meta-badge--desktop meta-badge--global">v{{ plugin.version }}</span>
@@ -2201,11 +2203,25 @@ api.utils                       RPHubUtils 全套工具</pre>
                                 <div class="mt-1 text-[11px] text-gray-400 truncate">
                                     {{ plugin.id }}<span v-if="plugin.author"> · {{ plugin.author }}</span>
                                 </div>
-                                <p v-if="plugin.description" class="mt-1 text-xs text-gray-500 truncate">{{ plugin.description }}</p>
-                                <p v-if="pluginRuntimeErrors[plugin.id]" class="mt-1 text-xs text-red-500 truncate">
+                                <p v-if="plugin.description" class="mt-1 text-xs text-gray-500"
+                                    :class="expandedPluginIds[plugin.id] ? 'whitespace-pre-wrap break-words' : 'truncate'">{{ plugin.description }}</p>
+                                <p v-if="pluginRuntimeErrors[plugin.id]" class="mt-1 text-xs text-red-500"
+                                    :class="expandedPluginIds[plugin.id] ? 'whitespace-pre-wrap break-words' : 'truncate'">
                                     运行错误：{{ pluginRuntimeErrors[plugin.id] }}
                                 </p>
+                                <div v-if="expandedPluginIds[plugin.id]"
+                                    class="mt-2 pt-2 border-t border-gray-100 text-[11px] leading-relaxed text-gray-500 space-y-1">
+                                    <div>版本 v{{ plugin.version }} · 宿主 API v{{ plugin.api }}</div>
+                                    <div>钩子 {{ (plugin.hooks || []).join(' / ') || '（无）' }}</div>
+                                    <div class="truncate">ID {{ plugin.id }}</div>
+                                    <div v-if="plugin.createdAt">引入 {{ plugin.createdAt }}</div>
+                                </div>
                             </div>
+                            <svg :class="{ 'rotate-180': expandedPluginIds[plugin.id] }"
+                                class="w-4 h-4 shrink-0 ml-2 text-gray-400 transition-transform" fill="none"
+                                stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path>
+                            </svg>
                         </div>
                         <div class="sortable-item-actions">
                             <label class="relative inline-flex items-center cursor-pointer">

@@ -9149,6 +9149,12 @@ const app = createApp({
         const PLUGIN_HOOKS = Object.freeze(['appReady', 'renderMessage', 'beforeSend']);
         const plugins = ref([]);
         const pluginRuntimeErrors = reactive({});
+        // 详情展开状态：纯 UI，不落库；插件删了自然消失
+        const expandedPluginIds = reactive({});
+        const togglePluginDetails = (plugin) => {
+            if (!plugin) return;
+            expandedPluginIds[plugin.id] = !expandedPluginIds[plugin.id];
+        };
 
         const makePluginId = () => `plugin-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
         const normalizePluginRecord = (raw, index = 0) => {
@@ -9351,6 +9357,7 @@ const app = createApp({
             upstreamSync,
             imageGallery, galleryFilterChar,
             pluginHostVersion: PLUGIN_HOST_VERSION,
+            expandedPluginIds, togglePluginDetails,
             plugins, pluginRuntimeErrors, importPlugins, exportPlugin, exportAllPlugins, removePlugin, togglePlugin, galleryPreviewSrc, showGalleryPreview, galleryCacheStats,
             getGalleryItemDisplaySrc, openGallery, openGalleryPreview, closeGalleryPreview, confirmGalleryImageSave,
             galleryCharacters, galleryAlbums, openAlbum, filteredGallery, galleryDateSections, visibleGalleryItems, handleGalleryScroll,
