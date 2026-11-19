@@ -1,0 +1,16 @@
+{
+  "format": "rphub-plugin",
+  "formatVersion": 1,
+  "id": "demo.rewrite",
+  "name": "正文改写骨架",
+  "version": "1.0.0",
+  "author": "你的名字",
+  "api": 2,
+  "description": "演示 renderMessage + beforeSend 两个钩子：把（括号动作）染成灰色斜体，发送前清掉零宽字符。",
+  "hooks": [
+    "appReady",
+    "renderMessage",
+    "beforeSend"
+  ],
+  "code": "api.style('.plugin-action{color:#94a3b8;font-style:italic}');\n\napi.on('renderMessage', (text, ctx) => {\n    if (ctx.role !== 'assistant') return text;\n    return text.replace(/（([^）\\n]{1,80})）/g, '<span class=\"plugin-action\">$1</span>');\n});\n\napi.on('beforeSend', (text) => text.replace(/[\\u200b-\\u200f\\ufeff]/g, ''));\n\napi.log('正文改写骨架 已注册');"
+}

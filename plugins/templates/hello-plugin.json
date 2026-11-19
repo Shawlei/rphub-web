@@ -1,0 +1,14 @@
+{
+  "format": "rphub-plugin",
+  "formatVersion": 1,
+  "id": "demo.hello",
+  "name": "我的第一个插件",
+  "version": "1.0.0",
+  "author": "你的名字",
+  "api": 2,
+  "description": "最小骨架：启用时弹一句 toast，并在控制台留一行日志。把它改成你要做的事就行。",
+  "hooks": [
+    "appReady"
+  ],
+  "code": "api.log('hello from', api.id, api.version);\napi.toast('插件跑起来了', 'success');"
+}

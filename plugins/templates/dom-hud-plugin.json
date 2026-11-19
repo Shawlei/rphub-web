@@ -1,0 +1,14 @@
+{
+  "format": "rphub-plugin",
+  "formatVersion": 1,
+  "id": "demo.dom",
+  "name": "DOM 增强骨架",
+  "version": "1.0.0",
+  "author": "你的名字",
+  "api": 2,
+  "description": "演示 MutationObserver 兜 Vue 重渲染：右下角挂一个实时的可见消息条数。改成自己的悬浮面板直接拿去用。",
+  "hooks": [
+    "appReady"
+  ],
+  "code": "api.style(`\n.plugin-badge{position:fixed;right:10px;bottom:80px;z-index:40;padding:5px 12px;border-radius:999px;\n  background:rgba(255,255,255,.88);box-shadow:0 4px 14px rgba(15,23,42,.14);\n  font-size:11px;color:#475569;pointer-events:none;font-variant-numeric:tabular-nums}\n`);\n\nconst badge = document.createElement('div');\nbadge.className = 'plugin-badge';\nbadge.textContent = '统计中…';\ndocument.body.appendChild(badge);\n\nconst sync = () => {\n    const rows = document.querySelectorAll('[data-chat-index]');\n    const last = document.querySelector('[data-chat-index]:last-of-type .message-content-wrapper');\n    const chars = last ? (last.innerText || '').replace(/\\s+/g, '').length : 0;\n    badge.textContent = '可见 ' + rows.length + ' 条 · 本轮 ' + chars + ' 字';\n};\n\n// 节流：自己插入节点也会触发 observer，用闸门挡住无限循环\nlet queued = false;\nconst schedule = () => {\n    if (queued) return;\n    queued = true;\n    requestAnimationFrame(() => { queued = false; sync(); });\n};\n\nconst observer = new MutationObserver(schedule);\nobserver.observe(document.body, { childList: true, subtree: true });\nsetInterval(schedule, 1500);\nsync();\napi.log('DOM 增强骨架 已挂载');"
+}
