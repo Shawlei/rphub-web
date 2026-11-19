@@ -9143,6 +9143,9 @@ const app = createApp({
         const PLUGIN_STORAGE_KEY = 'plugins';
         const PLUGIN_FORMAT = 'rphub-plugin';
         const PLUGIN_BUNDLE_FORMAT = 'rphub-plugins-bundle';
+        // 宿主 API 版本：插件包里写 "api": 2 表示需要 v2 的钩子（on/off/style）。
+        // 版本不够时直接给出可读的报错，而不是让插件跑一半挂在 "xxx is not a function"。
+        const PLUGIN_HOST_VERSION = 2;
         const PLUGIN_HOOKS = Object.freeze(['appReady', 'renderMessage', 'beforeSend']);
         const plugins = ref([]);
         const pluginRuntimeErrors = reactive({});
@@ -9160,6 +9163,7 @@ const app = createApp({
                 author: String(source.author || '').slice(0, 60),
                 description: String(source.description || source.desc || '').slice(0, 400),
                 hooks: hooks.length ? hooks : ['appReady'],
+                api: Math.max(1, Number(source.api) || 1),
                 code: typeof source.code === 'string' ? source.code : '',
                 enabled: source.enabled === true,
                 createdAt: String(source.createdAt || new Date().toISOString())
@@ -9182,6 +9186,10 @@ const app = createApp({
         const runPlugin = (plugin) => {
             if (!plugin || !plugin.code.trim()) {
                 pluginRuntimeErrors[plugin.id] = '插件没有可执行代码';
+                return false;
+            }
+            if (Number(plugin.api || 1) > PLUGIN_HOST_VERSION) {
+                pluginRuntimeErrors[plugin.id] = `需要插件宿主 v${plugin.api}，当前 v${PLUGIN_HOST_VERSION}，请先升级 App`;
                 return false;
             }
             try {
@@ -9280,6 +9288,7 @@ const app = createApp({
                 author: plugin.author,
                 description: plugin.description,
                 hooks: plugin.hooks,
+                api: plugin.api,
                 code: plugin.code
             };
             const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
@@ -9303,6 +9312,7 @@ const app = createApp({
                     author: plugin.author,
                     description: plugin.description,
                     hooks: plugin.hooks,
+                    api: plugin.api,
                     code: plugin.code
                 }))
             };
@@ -9340,6 +9350,7 @@ const app = createApp({
         return {
             upstreamSync,
             imageGallery, galleryFilterChar,
+            pluginHostVersion: PLUGIN_HOST_VERSION,
             plugins, pluginRuntimeErrors, importPlugins, exportPlugin, exportAllPlugins, removePlugin, togglePlugin, galleryPreviewSrc, showGalleryPreview, galleryCacheStats,
             getGalleryItemDisplaySrc, openGallery, openGalleryPreview, closeGalleryPreview, confirmGalleryImageSave,
             galleryCharacters, galleryAlbums, openAlbum, filteredGallery, galleryDateSections, visibleGalleryItems, handleGalleryScroll,
